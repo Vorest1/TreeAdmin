@@ -1,10 +1,19 @@
-import socket
+import http.client
+from urllib.parse import urlencode
 
-connection = socket.socket(socket.AF_INET, socket. SOCK_STREAM)
-IP = "127.0.0.1"
-PORT = 80
-connection.connect((IP, PORT))
-rd = connection.recv(1024)
-print(rd.decode('utf8'))
-connection.send("Hello, Server!".encode('utf8'))
-connection.close()
+
+def run_client(host: str = "127.0.0.1", port: int = 8000) -> None:
+    msg = "Hello, Server"
+
+    qs = urlencode({"msg": msg})
+    path = f"/hello?{qs}"
+
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    conn.request("GET", path)
+
+    resp = conn.getresponse()
+    body = resp.read().decode("utf-8", errors="replace").strip()
+    conn.close()
+
+    print(f"CLIENT: sent REQUEST GET: {msg}")
+    print(f"CLIENT: GET: {body} (status={resp.status})")
