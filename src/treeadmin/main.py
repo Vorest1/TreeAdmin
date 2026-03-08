@@ -1,7 +1,5 @@
-# main.py
 from src.treeadmin.serv import run_server
-from src.treeadmin.client import run_client
-
+from src.treeadmin.client import run_client, send_config, send_exec
 
 def main():
     print("Select mode:")
@@ -13,15 +11,27 @@ def main():
     port = 8000
 
     if choice == "1":
-        # host = input("Bind host (default 127.0.0.1): ").strip() or "127.0.0.1"
-        # port = int(input("Port (default 8000): ").strip() or "8000")
+        host = input("Server host (default 127.0.0.1): ").strip() or "127.0.0.1"
+        port = int(input("Server port (default 8000): ").strip() or "8000")
         run_server(host, port)
         return
 
     if choice == "2":
-        # host = input("Server host (default 127.0.0.1): ").strip() or "127.0.0.1"
-        # port = int(input("Server port (default 8000): ").strip() or "8000")
-        run_client(host, port)
+        host = input("Server host (default 127.0.0.1): ").strip() or "127.0.0.1"
+        port = int(input("Server port (default 8000): ").strip() or "8000")
+        choice2 = 0
+        while choice2 != 4:
+            print("Enter client function: ")
+            print("  1) ping")
+            print("  2) Send config file")
+            print("  3) Execute command")
+            choice2 = input("> ").strip()
+            if choice2 == "1":
+                run_client(host, port)
+            if choice2 == "2":
+                send_config(host, port, 8080)
+            if choice2 == "3":
+                send_exec(host, port, 8080)
         return
 
     print("Invalid selection.")

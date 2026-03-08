@@ -1,0 +1,8 @@
+{
+    "agent_id": "1",
+    "ip": "127.0.0.1",
+    "parent_host": 8000,
+    "next_port": "",
+    "level": "0",
+    "admin": "TRUE"
+}
