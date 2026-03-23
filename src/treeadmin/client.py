@@ -3,8 +3,12 @@ import json, socket
 from pathlib import Path
 from urllib.parse import urlencode
 
-def send_config(host="127.0.0.1", port=8000, to=8000):
-    
+from src.treeadmin.routing import build_first_request
+from src.treeadmin.config import ClientConfig
+
+CONFIG_PATH = Path("api/config_client.json")
+
+def send_config(target_id: str):
     file_path = Path("api/config.json")
 
     if not file_path.exists():
@@ -14,30 +18,42 @@ def send_config(host="127.0.0.1", port=8000, to=8000):
     config = json.loads(file_path.read_text(encoding="utf-8"))
 
     body = json.dumps(config, ensure_ascii=False).encode("utf-8")
-    qs = urlencode({"to": to})
-    path = f"/send_config?{qs}"
-
-    conn = http.client.HTTPConnection(host, port, timeout=10)
-    conn.request(
-        "POST",
-        path,
-        body=body,
-        headers={"Content-Type": "application/json; charset=utf-8", 
-                 "Content-Length": str(len(body))
-        }
+    # qs = urlencode({"to": to})
+    # path = f"/send_config?{qs}"
+    client_config = ClientConfig.load(CONFIG_PATH)
+    host, port, url_path = build_first_request(
+        client_config=client_config,
+        target_node_id=target_id,
+        endpoint_path="/send_config",
     )
-
-    resp = conn.getresponse()
-    print(resp.status, resp.read().decode("utf-8", errors="replace"))
-    conn.close()
-
-def open_shell(host: str = "127.0.0.1", port: int = 8000, to: int = 8000) -> tuple[str, str] | tuple[None, None]:
-    qs = urlencode({"to": to})
-    path = f"/open_shell?{qs}"
 
     conn = http.client.HTTPConnection(host, port, timeout=10)
     try:
-        conn.request("POST", path, body=b"", headers={"Content-Length": "0"})
+        conn.request(
+            "POST",
+            url_path,
+            body=body,
+            headers={"Content-Type": "application/json; charset=utf-8", 
+                    "Content-Length": str(len(body))
+            }
+        )
+
+        resp = conn.getresponse()
+        print(resp.status, resp.read().decode("utf-8", errors="replace"))
+    finally:
+        conn.close()
+
+def open_shell(target_id: str) -> tuple[str, str] | tuple[None, None]:
+    client_config = ClientConfig.load(CONFIG_PATH)
+    host, port, url_path = build_first_request(
+        client_config=client_config,
+        target_node_id=target_id,
+        endpoint_path="/open_shell",
+    )
+
+    conn = http.client.HTTPConnection(host, port, timeout=10)
+    try:
+        conn.request("POST", url_path, body=b"", headers={"Content-Length": "0"})
         resp = conn.getresponse()
         raw = resp.read().decode("utf-8", errors="replace")
 
@@ -51,14 +67,16 @@ def open_shell(host: str = "127.0.0.1", port: int = 8000, to: int = 8000) -> tup
         conn.close()
 
 def send_exec(
-    host: str,
-    port: int,
-    to: int,
+    target_id: str,
     session_id: str,
     command: str
 ) -> tuple[int, dict]:
-    qs = urlencode({"to": to})
-    path = f"/send_command?{qs}"
+    client_config = ClientConfig.load(CONFIG_PATH)
+    host, port, url_path = build_first_request(
+        client_config=client_config,
+        target_node_id=target_id,
+        endpoint_path="/send_command",
+    )
 
     payload = {
         "session_id": session_id,
@@ -70,7 +88,7 @@ def send_exec(
     try:
         conn.request(
             "POST",
-            path,
+            url_path,
             body=body,
             headers={
                 "Content-Type": "application/json; charset=utf-8",
@@ -121,9 +139,13 @@ def send_exec(
         conn.close()
 
 
-def close_shell(host: str, port: int, to: int, session_id: str) -> tuple[int, str]:
-    qs = urlencode({"to": to})
-    path = f"/close_shell?{qs}"
+def close_shell(target_id: str, session_id: str) -> tuple[int, str]:
+    client_config = ClientConfig.load(CONFIG_PATH)
+    host, port, url_path = build_first_request(
+        client_config=client_config,
+        target_node_id=target_id,
+        endpoint_path="/close_shell",
+    )
 
     payload = {"session_id": session_id}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -132,7 +154,7 @@ def close_shell(host: str, port: int, to: int, session_id: str) -> tuple[int, st
     try:
         conn.request(
             "POST",
-            path,
+            url_path,
             body=body,
             headers={
                 "Content-Type": "application/json; charset=utf-8",
@@ -148,8 +170,8 @@ def close_shell(host: str, port: int, to: int, session_id: str) -> tuple[int, st
 def clean_output(raw: str) -> str:
     return raw.replace("__PROMPT__", "").strip()
 
-def interactive_shell(host: str = "127.0.0.1", port: int = 8000, to: int = 8000):
-    session_id, current_dir = open_shell(host, port, to)
+def interactive_shell(target_id: str):
+    session_id, current_dir = open_shell(target_id)
     if not session_id:
         print("Failed to open shell session")
         return
@@ -164,7 +186,7 @@ def interactive_shell(host: str = "127.0.0.1", port: int = 8000, to: int = 8000)
             if cmd.lower() in {"exit", "quit"}:
                 break
 
-            status, result = send_exec(host, port, to, session_id, cmd)
+            status, result = send_exec(target_id, session_id, cmd)
 
             if status != 200:
                 print(f"[{status}] {result.get('output', '')}")
@@ -180,23 +202,29 @@ def interactive_shell(host: str = "127.0.0.1", port: int = 8000, to: int = 8000)
         print("\nExecute command stopped")
 
     finally:
-        status, response = close_shell(host, port, to, session_id)
+        status, response = close_shell(target_id, session_id)
         if status != 200:
             print(f"[{status}] {response}")
 
-def run_client(host: str = "127.0.0.1", port: int = 8000) -> None:
+def run_client() -> None:
     msg = "Hello, Server"
-    to_port = int(input("Finally Server port (default 8000): ").strip() or "8000")
+    target_id = input("Target server node id (for example pc2): ").strip() or "pc2"
 
-    qs = urlencode({"to": to_port,"msg": msg})
-    path = f"/hello?{qs}"
+    client_config = ClientConfig.load(CONFIG_PATH)
+    host, port, url_path = build_first_request(
+        client_config=client_config,
+        target_node_id=target_id,
+        endpoint_path="/hello",
+        extra_query={"msg": msg},
+    )
 
     conn = http.client.HTTPConnection(host, port, timeout=10)
-    conn.request("GET", path)
+    try:
+        conn.request("GET", url_path)
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", errors="replace").strip()
 
-    resp = conn.getresponse()
-    body = resp.read().decode("utf-8", errors="replace").strip()
-    conn.close()
-
-    print(f"CLIENT: sent REQUEST GET: {msg}")
-    print(f"CLIENT: GET: {body} (status={resp.status})")
+        print(f"CLIENT: sent REQUEST GET: {msg}")
+        print(f"CLIENT: GET: {body} (status={resp.status})")
+    finally:
+        conn.close()

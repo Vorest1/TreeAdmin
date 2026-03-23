@@ -1,0 +1,28 @@
+{
+  "self": {
+    "node_id": "pc1",
+    "role": "client"
+  },
+  "network": {
+    "listen_host": "127.0.0.1",
+    "listen_port": 8001,
+    "timeout": 10
+  },
+  "topology": {
+    "root_id": "pc1",
+    "nodes": [
+      {
+        "id": "pc1",
+        "role": "client",
+        "children": ["pc2"]
+      },
+      {
+        "id": "pc2",
+        "role": "server",
+        "host": "127.0.0.1",
+        "port": 8000,
+        "children": []
+      }
+    ]
+  }
+}
