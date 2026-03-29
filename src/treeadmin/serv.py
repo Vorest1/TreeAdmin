@@ -1,19 +1,24 @@
-import sys
+from __future__ import annotations
+
 import json
-import http.client
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+import os
+import platform
 import subprocess
-from datetime import datetime
+import sys
 import threading
 import uuid
+from datetime import datetime
+from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+import http.client
 
 from src.treeadmin.routing import (
-    parse_route_params,
-    get_current_hop,
-    is_final_hop,
     build_forward_request,
     format_route,
+    get_current_hop,
+    is_final_hop,
+    parse_route_params,
 )
 
 
@@ -54,7 +59,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_response(resp.status)
             self.send_header(
                 "Content-Type",
-                resp.getheader("Content-Type", "text/plain; charset=utf-8")
+                resp.getheader("Content-Type", "text/plain; charset=utf-8"),
             )
             self.send_header("Content-Length", str(len(resp_body)))
             self.end_headers()
@@ -68,8 +73,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    def _read_until_marker(self, process, marker: str) -> str:
-        lines = []
+    def _read_until_marker(self, process: subprocess.Popen, marker: str) -> str:
+        lines: list[str] = []
         while True:
             line = process.stdout.readline()
             if not line:
@@ -94,7 +99,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if not hops:
             raise ValueError("empty route")
 
-        get_current_hop(hops, hop_index)  # только проверка индекса
+        get_current_hop(hops, hop_index)
         return qs, hops, hop_index
 
     def _load_json_payload(self, body: bytes) -> dict:
@@ -112,48 +117,134 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         return payload
 
-    def _handle_open_shell(self):
+    def _get_platform_name(self) -> str:
+        system_name = platform.system().lower()
+
+        if system_name.startswith("win"):
+            return "windows"
+
+        if system_name in {"linux", "darwin"}:
+            return "posix"
+
+        return "posix"
+
+    def _handle_open_shell(self) -> None:
         session_id = str(self.server.next_session_id)
         self.server.next_session_id += 1
 
-        process = subprocess.Popen(
-            ["cmd.exe", "/Q", "/K"],
-            cwd="C:/Users/user/Desktop",
-            stdin=subprocess.PIPE,
+        platform_name = self._get_platform_name()
+
+        if platform_name == "windows":
+            start_cwd = "C:/Users/user/Desktop"
+
+            process = subprocess.Popen(
+                ["cmd.exe", "/Q", "/K"],
+                cwd=start_cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="cp866",
+                bufsize=1,
+            )
+
+            process.stdin.write("prompt __PROMPT__$\n")
+            process.stdin.write("cd\n")
+            process.stdin.write("echo __OPEN_END__\n")
+            process.stdin.flush()
+
+            lines: list[str] = []
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                if "__OPEN_END__" in line:
+                    break
+                lines.append(line)
+
+            cwd_raw = "".join(lines).replace("__PROMPT__", "").strip()
+            if ">" in cwd_raw:
+                cwd_raw = cwd_raw.split(">")[-1].strip()
+
+            self.server.shell_sessions[session_id] = {
+                "platform": "windows",
+                "process": process,
+                "lock": threading.Lock(),
+                "cwd": cwd_raw or start_cwd,
+            }
+
+            self._send_json(
+                200,
+                {
+                    "session_id": session_id,
+                    "cwd": cwd_raw or start_cwd,
+                },
+            )
+            return
+
+        start_cwd = str(Path.home())
+
+        self.server.shell_sessions[session_id] = {
+            "platform": "posix",
+            "process": None,
+            "lock": threading.Lock(),
+            "cwd": start_cwd,
+        }
+
+        self._send_json(
+            200,
+            {
+                "session_id": session_id,
+                "cwd": start_cwd,
+            },
+        )
+
+    def _run_posix_command(self, command: str, cwd: str) -> tuple[str, str, int]:
+        if not isinstance(cwd, str) or not cwd.strip():
+            cwd = str(Path.home())
+
+        cmd = command.strip()
+
+        if not cmd:
+            return "", cwd, 0
+
+        if cmd == "cd":
+            new_cwd = str(Path.home())
+            return "", new_cwd, 0
+
+        if cmd.startswith("cd "):
+            target = cmd[3:].strip()
+
+            if (target.startswith('"') and target.endswith('"')) or (
+                target.startswith("'") and target.endswith("'")
+            ):
+                target = target[1:-1]
+
+            if not target:
+                new_cwd = str(Path.home())
+                return "", new_cwd, 0
+
+            if os.path.isabs(target):
+                candidate = os.path.abspath(target)
+            else:
+                candidate = os.path.abspath(os.path.join(cwd, target))
+
+            if not os.path.isdir(candidate):
+                return f"cd: no such directory: {target}", cwd, 1
+
+            return "", candidate, 0
+
+        completed = subprocess.run(
+            ["/bin/bash", "-lc", command],
+            cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            encoding="cp866",
-            bufsize=1
+            encoding="utf-8",
         )
 
-        process.stdin.write("prompt __PROMPT__$\n")
-        process.stdin.write("cd\n")
-        process.stdin.write("echo __OPEN_END__\n")
-        process.stdin.flush()
-
-        lines = []
-        while True:
-            line = process.stdout.readline()
-            if not line:
-                break
-            if "__OPEN_END__" in line:
-                break
-            lines.append(line)
-
-        cwd_raw = "".join(lines).replace("__PROMPT__", "").strip()
-        if ">" in cwd_raw:
-            cwd_raw = cwd_raw.split(">")[-1].strip()
-
-        self.server.shell_sessions[session_id] = {
-            "process": process,
-            "lock": threading.Lock()
-        }
-
-        self._send_json(200, {
-            "session_id": session_id,
-            "cwd": cwd_raw
-        })
+        output = completed.stdout or ""
+        return output, cwd, completed.returncode
 
     def _handle_send_command(self, payload: dict) -> None:
         session_id = payload.get("session_id")
@@ -172,54 +263,80 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._send_text(404, "session not found")
             return
 
-        process = session["process"]
+        platform_name = session.get("platform")
         lock = session["lock"]
-
-        if process.poll() is not None:
-            self._send_text(500, "shell process already terminated")
-            return
-
-        cmd_marker = f"__END__{uuid.uuid4().hex}__"
-        cwd_marker = f"__CWD_END__{uuid.uuid4().hex}__"
 
         try:
             with lock:
-                process.stdin.write(command + "\n")
-                process.stdin.write(f"echo {cmd_marker}\n")
-                process.stdin.flush()
+                if platform_name == "windows":
+                    process = session["process"]
 
-                output_lines = []
-                while True:
-                    line = process.stdout.readline()
-                    if not line:
-                        break
-                    if cmd_marker in line:
-                        break
-                    output_lines.append(line)
+                    if process is None:
+                        self._send_text(500, "windows shell process is missing")
+                        return
 
-                process.stdin.write("cd\n")
-                process.stdin.write(f"echo {cwd_marker}\n")
-                process.stdin.flush()
+                    if process.poll() is not None:
+                        self._send_text(500, "shell process already terminated")
+                        return
 
-                cwd_lines = []
-                while True:
-                    line = process.stdout.readline()
-                    if not line:
-                        break
-                    if cwd_marker in line:
-                        break
-                    cwd_lines.append(line)
+                    cmd_marker = f"__END__{uuid.uuid4().hex}__"
+                    cwd_marker = f"__CWD_END__{uuid.uuid4().hex}__"
 
-            output = "".join(output_lines).replace("__PROMPT__", "").strip()
-            cwd_raw = "".join(cwd_lines).replace("__PROMPT__", "").strip()
+                    process.stdin.write(command + "\n")
+                    process.stdin.write(f"echo {cmd_marker}\n")
+                    process.stdin.flush()
 
-            if ">" in cwd_raw:
-                cwd_raw = cwd_raw.split(">")[-1].strip()
+                    output_lines: list[str] = []
+                    while True:
+                        line = process.stdout.readline()
+                        if not line:
+                            break
+                        if cmd_marker in line:
+                            break
+                        output_lines.append(line)
 
-            self._send_json(200, {
-                "output": output,
-                "cwd": cwd_raw,
-            })
+                    process.stdin.write("cd\n")
+                    process.stdin.write(f"echo {cwd_marker}\n")
+                    process.stdin.flush()
+
+                    cwd_lines: list[str] = []
+                    while True:
+                        line = process.stdout.readline()
+                        if not line:
+                            break
+                        if cwd_marker in line:
+                            break
+                        cwd_lines.append(line)
+
+                    output = "".join(output_lines).replace("__PROMPT__", "").strip()
+                    cwd_raw = "".join(cwd_lines).replace("__PROMPT__", "").strip()
+
+                    if ">" in cwd_raw:
+                        cwd_raw = cwd_raw.split(">")[-1].strip()
+
+                    session["cwd"] = cwd_raw or session.get("cwd", "")
+
+                    self._send_json(
+                        200,
+                        {
+                            "output": output,
+                            "cwd": session["cwd"],
+                        },
+                    )
+                    return
+
+                cwd = session.get("cwd", str(Path.home()))
+                output, new_cwd, returncode = self._run_posix_command(command, cwd)
+                session["cwd"] = new_cwd
+
+                self._send_json(
+                    200,
+                    {
+                        "output": output.strip(),
+                        "cwd": new_cwd,
+                        "returncode": returncode,
+                    },
+                )
 
         except Exception as e:
             self._send_text(500, f"command execution error: {e}")
@@ -235,15 +352,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._send_text(404, "session not found")
             return
 
-        process = session["process"]
+        platform_name = session.get("platform")
+        process = session.get("process")
 
-        try:
-            if process.poll() is None:
-                process.stdin.write("exit\n")
-                process.stdin.flush()
-                process.wait(timeout=3)
-        except Exception:
-            process.kill()
+        if platform_name == "windows" and process is not None:
+            try:
+                if process.poll() is None:
+                    process.stdin.write("exit\n")
+                    process.stdin.flush()
+                    process.wait(timeout=3)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
 
         self._send_text(200, "shell closed")
 
@@ -317,7 +439,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/open_shell":
-            self._handle_open_shell()
+            try:
+                self._handle_open_shell()
+            except Exception as e:
+                self._send_text(500, f"open shell error: {e}")
             return
 
         try:
