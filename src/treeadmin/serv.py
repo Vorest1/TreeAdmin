@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import platform
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime
-from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-import http.client
 
 from src.treeadmin.routing import (
     build_forward_request,
@@ -20,6 +21,10 @@ from src.treeadmin.routing import (
     is_final_hop,
     parse_route_params,
 )
+
+
+SESSION_TTL_SECONDS = 15 * 60
+SESSION_CLEANER_INTERVAL = 30
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -73,17 +78,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    def _read_until_marker(self, process: subprocess.Popen, marker: str) -> str:
-        lines: list[str] = []
-        while True:
-            line = process.stdout.readline()
-            if not line:
-                break
-            if marker in line:
-                break
-            lines.append(line)
-        return "".join(lines)
-
     def _extract_extra_query(self, qs: dict[str, list[str]]) -> dict[str, str]:
         extra: dict[str, str] = {}
         for key, values in qs.items():
@@ -128,11 +122,28 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         return "posix"
 
+    def _close_session_resources(self, session: dict) -> None:
+        platform_name = session.get("platform")
+        process = session.get("process")
+
+        if platform_name == "windows" and process is not None:
+            try:
+                if process.poll() is None:
+                    process.stdin.write("exit\n")
+                    process.stdin.flush()
+                    process.wait(timeout=3)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
     def _handle_open_shell(self) -> None:
         session_id = str(self.server.next_session_id)
         self.server.next_session_id += 1
 
         platform_name = self._get_platform_name()
+        now = time.time()
 
         if platform_name == "windows":
             start_cwd = "C:/Users/user/Desktop"
@@ -171,6 +182,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "process": process,
                 "lock": threading.Lock(),
                 "cwd": cwd_raw or start_cwd,
+                "created_at": now,
+                "last_activity": now,
             }
 
             self._send_json(
@@ -189,6 +202,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "process": None,
             "lock": threading.Lock(),
             "cwd": start_cwd,
+            "created_at": now,
+            "last_activity": now,
         }
 
         self._send_json(
@@ -268,6 +283,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         try:
             with lock:
+                session["last_activity"] = time.time()
+
                 if platform_name == "windows":
                     process = session["process"]
 
@@ -315,6 +332,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         cwd_raw = cwd_raw.split(">")[-1].strip()
 
                     session["cwd"] = cwd_raw or session.get("cwd", "")
+                    session["last_activity"] = time.time()
 
                     self._send_json(
                         200,
@@ -328,6 +346,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 cwd = session.get("cwd", str(Path.home()))
                 output, new_cwd, returncode = self._run_posix_command(command, cwd)
                 session["cwd"] = new_cwd
+                session["last_activity"] = time.time()
 
                 self._send_json(
                     200,
@@ -352,21 +371,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._send_text(404, "session not found")
             return
 
-        platform_name = session.get("platform")
-        process = session.get("process")
-
-        if platform_name == "windows" and process is not None:
-            try:
-                if process.poll() is None:
-                    process.stdin.write("exit\n")
-                    process.stdin.flush()
-                    process.wait(timeout=3)
-            except Exception:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-
+        self._close_session_resources(session)
         self._send_text(200, "shell closed")
 
     def do_GET(self):
@@ -469,12 +474,59 @@ class ProxyHandler(BaseHTTPRequestHandler):
         )
 
 
+def _cleanup_expired_sessions(httpd) -> None:
+    while True:
+        time.sleep(httpd.session_cleaner_interval)
+
+        now = time.time()
+        expired_ids: list[str] = []
+
+        for session_id, session in list(httpd.shell_sessions.items()):
+            last_activity = session.get("last_activity", now)
+            if now - last_activity > httpd.session_ttl_seconds:
+                expired_ids.append(session_id)
+
+        for session_id in expired_ids:
+            session = httpd.shell_sessions.pop(session_id, None)
+            if session is None:
+                continue
+
+            try:
+                platform_name = session.get("platform")
+                process = session.get("process")
+
+                if platform_name == "windows" and process is not None:
+                    try:
+                        if process.poll() is None:
+                            process.stdin.write("exit\n")
+                            process.stdin.flush()
+                            process.wait(timeout=3)
+                    except Exception:
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+
+                print(f"SESSION TIMEOUT: closed inactive session {session_id}")
+            except Exception as e:
+                print(f"SESSION TIMEOUT ERROR: {session_id}: {e}")
+
+
 def run_server(host: str = "0.0.0.0", port: int = 8000):
     httpd = ThreadingHTTPServer((host, port), ProxyHandler)
     print(f"Server started: http://{host}:{port}")
 
     httpd.shell_sessions = {}
     httpd.next_session_id = 1
+    httpd.session_ttl_seconds = SESSION_TTL_SECONDS
+    httpd.session_cleaner_interval = SESSION_CLEANER_INTERVAL
+
+    cleaner = threading.Thread(
+        target=_cleanup_expired_sessions,
+        args=(httpd,),
+        daemon=True,
+    )
+    cleaner.start()
 
     try:
         httpd.serve_forever()

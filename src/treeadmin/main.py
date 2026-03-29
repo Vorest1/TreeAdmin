@@ -83,19 +83,21 @@ def _client_menu() -> None:
 
 
 def main() -> None:
+    print("\nSelect mode:")
+    print("1) Server")
+    print("2) Client")
+    print("0) Exit")
+
+    choice = input("> ").strip()
     try:
         while True:
-            print("\nSelect mode:")
-            print("1) Server")
-            print("2) Client")
-            print("0) Exit")
-
-            choice = input("> ").strip()
 
             if choice == "1":
                 run_server()
+                return
             elif choice == "2":
                 _client_menu()
+                return
             elif choice == "0":
                 print("Exit")
                 break
