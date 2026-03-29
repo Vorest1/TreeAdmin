@@ -1,60 +1,107 @@
+from __future__ import annotations
+
 from src.treeadmin.serv import run_server
-from src.treeadmin.client import run_client, send_config, interactive_shell
-from src.treeadmin.config import ServerConfig
+from src.treeadmin.client import ping_server, interactive_shell
+from src.treeadmin.config import ClientConfig
 
-def main():
-    print("Select mode:")
-    print("  1) Server")
-    print("  2) Client")
 
-    choice = input("> ").strip()
+def _print_topology(config: ClientConfig) -> None:
+    print("\nCurrent topology:")
+    print(f"root_id: {config.root_id}")
+    print(f"timeout: {config.timeout}")
 
-    if choice == "1":
-        choice_vars = ["y", "n", "Y", "N", ""]
-        choice_cfg = "_"
-        try:
-            while choice_cfg not in choice_vars:
-                choice_cfg = input("Do you want load current config [Y/n] (n - create new config)? > ").strip()
-        except KeyboardInterrupt:
-            print("Close programm")
-            return
-        
-        if choice_cfg == "y" or choice_cfg == "Y" or choice_cfg == "" :
-            run_server()
-        if choice_cfg == "n" or choice_cfg == "N" :
-            node_id = input("Enter Node Id: ").strip()
-            host = input("Enter host: ").strip()
-            port = int(input("Enter port: ").strip())
-            server = ServerConfig.build(node_id=node_id, listen_host=host, listen_port=port)
-            server.save()
-            run_server(server)
+    default_port = config.data.get("default_port")
+    if default_port is not None:
+        print(f"default_port: {default_port}")
+
+    print("nodes:")
+
+    for node_id, node in config.nodes.items():
+        host = node.get("host", "-")
+        port = node.get("port", config.data.get("default_port", "-"))
+        children = node.get("children", [])
+        print(f"  {node_id}: host={host}, port={port}, children={children}")
+
+
+def _reset_client_config() -> None:
+    config = ClientConfig.build_basic()
+    config.save()
+    print(f"Client config reset: {config.path}")
+
+
+def _ping_menu() -> None:
+    target_id = input("Target server node id [pc2]: ").strip() or "pc2"
+    status, body = ping_server(target_id)
+
+    print("CLIENT: sent REQUEST GET: Hello, Server")
+    print(f"CLIENT: GET: {body.strip()} (status={status})")
+
+
+def _exec_menu() -> None:
+    target_id = input("Target server node id [pc2]: ").strip() or "pc2"
+    interactive_shell(target_id)
+
+
+def _show_topology_menu() -> None:
+    try:
+        config = ClientConfig.load()
+    except Exception as e:
+        print(f"Failed to load client config: {e}")
         return
 
-    if choice == "2":
-        choice2 = 0
-        try:
-            while True:
-                print("Enter client function: ")
-                print("  1) ping")
-                print("  2) Send config file")
-                print("  3) Execute command")
-                choice2 = input("> ").strip()
+    _print_topology(config)
 
-                if choice2 == "1":
-                    run_client()
 
-                if choice2 == "2":
-                    target_id = input("Finally Server node id (default pc2): ").strip() or "pc2"
-                    file_path = input("Config file path (default api/config.json): ").strip() or "api/config.json"
-                    send_config(target_id, file_path)
+def _client_menu() -> None:
+    try:
+        while True:
+            print("\nEnter client function:")
+            print("1) Ping server")
+            print("2) Execute command")
+            print("3) Reset config to basic")
+            print("4) Show topology")
+            print("0) Back")
 
-                if choice2 == "3":
-                    target_id = input("Finally Server node id (default pc2): ").strip() or "pc2"
-                    interactive_shell(target_id)
+            choice = input("> ").strip()
 
-        except KeyboardInterrupt:
-            print("Client stopped")
-            return
+            if choice == "1":
+                _ping_menu()
+            elif choice == "2":
+                _exec_menu()
+            elif choice == "3":
+                _reset_client_config()
+            elif choice == "4":
+                _show_topology_menu()
+            elif choice == "0":
+                break
+            else:
+                print("Unknown menu item")
+    except KeyboardInterrupt:
+        print("Close programm!\n")
+        return
 
-    print("Invalid selection.")
-    return
+
+
+def main() -> None:
+    try:
+        while True:
+            print("\nSelect mode:")
+            print("1) Server")
+            print("2) Client")
+            print("0) Exit")
+
+            choice = input("> ").strip()
+
+            if choice == "1":
+                run_server()
+            elif choice == "2":
+                _client_menu()
+            elif choice == "0":
+                print("Exit")
+                break
+            else:
+                print("Unknown menu item")
+    except KeyboardInterrupt:
+        print("Close programm!\n")
+        return
+    

@@ -8,88 +8,73 @@ from urllib.parse import urlencode
 RouteHop = dict[str, Any]
 
 
-def _config_to_dict(config: Any) -> dict[str, Any]:
+def _get_root_id(config: Any) -> str:
     if isinstance(config, dict):
-        return config
+        root_id = config.get("root_id")
+        if isinstance(root_id, str) and root_id.strip():
+            return root_id
+
+    root_id = getattr(config, "root_id", None)
+    if isinstance(root_id, str) and root_id.strip():
+        return root_id
 
     data = getattr(config, "data", None)
     if isinstance(data, dict):
-        return data
+        root_id = data.get("root_id")
+        if isinstance(root_id, str) and root_id.strip():
+            return root_id
 
-    raise ValueError("Config must be dict or object with .data dict")
+    raise ValueError("Client config must contain non-empty root_id")
 
 
-def _get_topology(config: Any) -> dict[str, Any]:
+def _get_nodes(config: Any) -> dict[str, dict[str, Any]]:
     if isinstance(config, dict):
-        topology = config.get("topology")
-        if not isinstance(topology, dict):
-            raise ValueError("Client config must contain topology")
-        return topology
+        nodes = config.get("nodes")
+        if isinstance(nodes, dict) and nodes:
+            return nodes
 
-    topology = getattr(config, "topology", None)
-    if isinstance(topology, dict):
-        return topology
+    nodes = getattr(config, "nodes", None)
+    if isinstance(nodes, dict) and nodes:
+        return nodes
 
     data = getattr(config, "data", None)
     if isinstance(data, dict):
-        topology = data.get("topology")
-        if isinstance(topology, dict):
-            return topology
+        nodes = data.get("nodes")
+        if isinstance(nodes, dict) and nodes:
+            return nodes
 
-    raise ValueError("Client config must contain topology")
+    raise ValueError("Client config must contain non-empty nodes")
 
 
-def _get_self_node_id(config: Any) -> str:
+def _get_default_port(config: Any) -> int | None:
     if isinstance(config, dict):
-        self_block = config.get("self")
-        if not isinstance(self_block, dict):
-            raise ValueError("Config must contain self block")
+        port = config.get("default_port")
+        if port is None:
+            return None
+        if isinstance(port, int) and port > 0:
+            return port
+        raise ValueError("default_port must be positive integer")
 
-        node_id = self_block.get("node_id")
-        if not isinstance(node_id, str) or not node_id.strip():
-            raise ValueError("self.node_id must be non-empty string")
-        return node_id
-
-    node_id = getattr(config, "node_id", None)
-    if isinstance(node_id, str) and node_id.strip():
-        return node_id
+    port = getattr(config, "default_port", None)
+    if port is not None:
+        if isinstance(port, int) and port > 0:
+            return port
+        raise ValueError("default_port must be positive integer")
 
     data = getattr(config, "data", None)
     if isinstance(data, dict):
-        self_block = data.get("self")
-        if isinstance(self_block, dict):
-            node_id = self_block.get("node_id")
-            if isinstance(node_id, str) and node_id.strip():
-                return node_id
+        port = data.get("default_port")
+        if port is None:
+            return None
+        if isinstance(port, int) and port > 0:
+            return port
+        raise ValueError("default_port must be positive integer")
 
-    raise ValueError("self.node_id must be non-empty string")
-
-
-def _build_node_index(topology: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    nodes = topology.get("nodes")
-    if not isinstance(nodes, list) or not nodes:
-        raise ValueError("topology.nodes must be non-empty list")
-
-    index: dict[str, dict[str, Any]] = {}
-
-    for node in nodes:
-        if not isinstance(node, dict):
-            raise ValueError("Each topology node must be object")
-
-        node_id = node.get("id")
-        if not isinstance(node_id, str) or not node_id.strip():
-            raise ValueError("Each node must have non-empty id")
-
-        if node_id in index:
-            raise ValueError(f"Duplicate node id: {node_id}")
-
-        index[node_id] = node
-
-    return index
+    return None
 
 
 def _find_path_dfs(
-    node_index: dict[str, dict[str, Any]],
+    nodes: dict[str, dict[str, Any]],
     current_id: str,
     target_id: str,
     visited: set[str] | None = None,
@@ -100,17 +85,28 @@ def _find_path_dfs(
     if current_id in visited:
         return None
 
+    if current_id not in nodes:
+        raise ValueError(f"Unknown node in path search: '{current_id}'")
+
     visited.add(current_id)
 
     if current_id == target_id:
         return [current_id]
 
-    current_node = node_index.get(current_id)
-    if current_node is None:
-        return None
+    current_node = nodes[current_id]
+    children = current_node.get("children", [])
 
-    for child_id in current_node.get("children", []):
-        path = _find_path_dfs(node_index, child_id, target_id, visited.copy())
+    if children is None:
+        children = []
+
+    if not isinstance(children, list):
+        raise ValueError(f"children of node '{current_id}' must be list")
+
+    for child_id in children:
+        if not isinstance(child_id, str) or not child_id.strip():
+            raise ValueError(f"Invalid child id in node '{current_id}'")
+
+        path = _find_path_dfs(nodes, child_id, target_id, visited.copy())
         if path is not None:
             return [current_id] + path
 
@@ -118,44 +114,41 @@ def _find_path_dfs(
 
 
 def build_route_hops(client_config: Any, target_node_id: str) -> list[RouteHop]:
-    topology = _get_topology(client_config)
+    if not isinstance(target_node_id, str) or not target_node_id.strip():
+        raise ValueError("target_node_id must be non-empty string")
 
-    root_id = topology.get("root_id")
-    if not isinstance(root_id, str) or not root_id.strip():
-        raise ValueError("topology.root_id must be non-empty string")
+    root_id = _get_root_id(client_config)
+    nodes = _get_nodes(client_config)
+    default_port = _get_default_port(client_config)
 
-    node_index = _build_node_index(topology)
+    if root_id not in nodes:
+        raise ValueError(f"root_id '{root_id}' not found in nodes")
 
-    if target_node_id not in node_index:
-        raise ValueError(f"Target node '{target_node_id}' not found in topology")
+    if target_node_id not in nodes:
+        raise ValueError(f"Target node '{target_node_id}' not found in nodes")
 
-    path_ids = _find_path_dfs(node_index, root_id, target_node_id)
+    path_ids = _find_path_dfs(nodes, root_id, target_node_id)
     if path_ids is None:
         raise ValueError(f"No route from '{root_id}' to '{target_node_id}'")
 
     if len(path_ids) < 2:
-        raise ValueError("Route must contain at least one server hop after client root")
+        raise ValueError("Route must contain at least one hop after root")
 
     hops: list[RouteHop] = []
 
     for node_id in path_ids[1:]:
-        node = node_index[node_id]
-        role = node.get("role")
-
-        if role != "server":
-            raise ValueError(
-                f"Route contains non-server node '{node_id}' after root. "
-                "Only server hops are allowed after client root."
-            )
-
+        node = nodes[node_id]
         host = node.get("host")
-        port = node.get("port")
+        port = node.get("port", default_port)
 
         if not isinstance(host, str) or not host.strip():
-            raise ValueError(f"Server node '{node_id}' must have non-empty host")
+            raise ValueError(f"Node '{node_id}' must have non-empty host")
 
         if not isinstance(port, int) or port <= 0:
-            raise ValueError(f"Server node '{node_id}' must have positive port")
+            raise ValueError(
+                f"Node '{node_id}' must have positive port "
+                f"(explicitly or via default_port)"
+            )
 
         hops.append({
             "id": node_id,
@@ -173,7 +166,33 @@ def encode_route(hops: list[RouteHop]) -> str:
     if not isinstance(hops, list) or not hops:
         raise ValueError("Route hops must be non-empty list")
 
-    return json.dumps(hops, ensure_ascii=False, separators=(",", ":"))
+    normalized: list[RouteHop] = []
+
+    for hop in hops:
+        if not isinstance(hop, dict):
+            raise ValueError("Each route hop must be object")
+
+        host = hop.get("host")
+        port = hop.get("port")
+        node_id = hop.get("id")
+
+        if not isinstance(host, str) or not host.strip():
+            raise ValueError("Route hop must have non-empty host")
+
+        if not isinstance(port, int) or port <= 0:
+            raise ValueError("Route hop must have positive port")
+
+        item: RouteHop = {
+            "host": host,
+            "port": port,
+        }
+
+        if isinstance(node_id, str) and node_id.strip():
+            item["id"] = node_id
+
+        normalized.append(item)
+
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
 
 
 def decode_route(raw: str) -> list[RouteHop]:
@@ -194,24 +213,25 @@ def decode_route(raw: str) -> list[RouteHop]:
         if not isinstance(item, dict):
             raise ValueError("Each route hop must be object")
 
-        node_id = item.get("id")
         host = item.get("host")
         port = item.get("port")
-
-        if not isinstance(node_id, str) or not node_id.strip():
-            raise ValueError("Route hop id must be non-empty string")
+        node_id = item.get("id")
 
         if not isinstance(host, str) or not host.strip():
-            raise ValueError(f"Route hop '{node_id}' must have non-empty host")
+            raise ValueError("Route hop must have non-empty host")
 
         if not isinstance(port, int) or port <= 0:
-            raise ValueError(f"Route hop '{node_id}' must have positive port")
+            raise ValueError("Route hop must have positive port")
 
-        hops.append({
-            "id": node_id,
+        hop: RouteHop = {
             "host": host,
             "port": port,
-        })
+        }
+
+        if isinstance(node_id, str) and node_id.strip():
+            hop["id"] = node_id
+
+        hops.append(hop)
 
     return hops
 
@@ -222,7 +242,7 @@ def build_routed_path(
     hop_index: int = 0,
     extra_query: dict[str, Any] | None = None,
 ) -> str:
-    if not endpoint_path.startswith("/"):
+    if not isinstance(endpoint_path, str) or not endpoint_path.startswith("/"):
         raise ValueError("endpoint_path must start with '/'")
 
     if not isinstance(hop_index, int) or hop_index < 0:
@@ -323,21 +343,17 @@ def build_forward_request(
     return host, port, path
 
 
-def validate_current_node(local_config: Any, hops: list[RouteHop], hop_index: int) -> None:
-    current_node_id = _get_self_node_id(local_config)
-
-    current_hop = get_current_hop(hops, hop_index)
-    expected_id = current_hop["id"]
-
-    if current_node_id != expected_id:
-        raise ValueError(
-            f"Route mismatch: current node is '{current_node_id}', "
-            f"but route expects '{expected_id}'"
-        )
-
-
 def format_route(hops: list[RouteHop]) -> str:
     parts: list[str] = []
-    for hop in hops:
-        parts.append(f"{hop['id']}({hop['host']}:{hop['port']})")
+
+    for index, hop in enumerate(hops):
+        host = hop["host"]
+        port = hop["port"]
+        node_id = hop.get("id")
+
+        if isinstance(node_id, str) and node_id.strip():
+            parts.append(f"{node_id}({host}:{port})")
+        else:
+            parts.append(f"hop{index}({host}:{port})")
+
     return " -> ".join(parts)
