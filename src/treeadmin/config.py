@@ -1,12 +1,10 @@
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Any
 
 
-API_DIR = Path("api")
-CLIENT_CONFIG_PATH = API_DIR / "config_client.json"
+CONFIG_DIR = Path("config")
+CLIENT_CONFIG_PATH = CONFIG_DIR / "config_client.json"
 
 
 class ClientConfig:
