@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+import threading
+import time
+
+
+class SessionWorkers:
+    def __init__(self, sessions, jobs) -> None:
+        self.sessions = sessions
+        self.jobs = jobs
+        self._workers: dict[str, threading.Thread] = {}
+        self._lock = threading.RLock()
+
+    def ensure_worker(self, session_id: str) -> None:
+        with self._lock:
+            thread = self._workers.get(session_id)
+            if thread is not None and thread.is_alive():
+                return
+
+            worker = threading.Thread(
+                target=self._worker_loop,
+                args=(session_id,),
+                daemon=True,
+                name=f"session-worker-{session_id}",
+            )
+            self._workers[session_id] = worker
+            worker.start()
+
+    def _worker_loop(self, session_id: str) -> None:
+        try:
+            while True:
+                session = self.sessions.get_session(session_id)
+                if session is None:
+                    return
+
+                claimed_job = self.jobs.claim_next_job(session_id)
+                if claimed_job is None:
+                    time.sleep(0.5)
+                    continue
+
+                try:
+                    output, cwd, returncode = self.sessions.execute(
+                        session_id,
+                        str(claimed_job.get("command", "")),
+                    )
+                    status = "finished"
+                    error = None
+                except Exception as e:
+                    output, cwd, returncode = "", "", None
+                    status = "failed"
+                    error = str(e)
+
+                session_after = self.sessions.get_session(session_id)
+                callback = None
+                if session_after is not None:
+                    callback = session_after.get("client_callback")
+
+                self.jobs.finish_job(
+                    job_id=str(claimed_job.get("job_id", "")),
+                    status=status,
+                    output=output,
+                    cwd=cwd,
+                    returncode=returncode,
+                    error=error,
+                    callback=callback,
+                )
+        finally:
+            with self._lock:
+                self._workers.pop(session_id, None)
