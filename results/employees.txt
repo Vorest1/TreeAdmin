@@ -1,6 +1,0 @@
-id |   full_name   |     position      |  salary   | department_id |         created_at         
-----+---------------+-------------------+-----------+---------------+----------------------------
-  1 | Ivan Petrov   | Backend Developer | 120000.00 |             1 | 2026-03-29 20:50:53.886169
-  2 | Anna Sidorova | HR Manager        |  85000.00 |             2 | 2026-03-29 20:50:53.886169
-  3 | Petr Smirnov  | Support Engineer  |  70000.00 |             3 | 2026-03-29 20:50:53.886169
-(3 rows)

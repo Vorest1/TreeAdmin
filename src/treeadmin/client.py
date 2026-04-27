@@ -21,11 +21,16 @@ BACKGROUND_POLL_INTERVAL_SECONDS = float(os.getenv("TREEADMIN_BACKGROUND_POLL_IN
 _PRINT_LOCK = threading.RLock()
 _POLLERS_LOCK = threading.RLock()
 _CWD_LOCK = threading.RLock()
+_PULL_LOCKS_LOCK = threading.RLock()
+_SEEN_RESPONSES_LOCK = threading.RLock()
 
 _RESULT_POLLERS: dict[tuple[str, str], threading.Thread] = {}
 _RESULT_POLL_STOP_EVENTS: dict[tuple[str, str], threading.Event] = {}
 _RESULT_POLL_MODES: dict[tuple[str, str], str] = {}
 _SESSION_LAST_CWD: dict[tuple[str, str], str] = {}
+
+_PULL_LOCKS: dict[tuple[str, str], threading.RLock] = {}
+_SEEN_RESPONSE_IDS: set[tuple[str, str]] = set()
 
 
 def _safe_print(*args, **kwargs) -> None:
@@ -104,6 +109,7 @@ def _save_command_output(output_path: str, text: str) -> None:
 def _set_session_cwd(target_id: str, session_id: str, cwd: str) -> None:
     if not cwd:
         return
+
     with _CWD_LOCK:
         _SESSION_LAST_CWD[(target_id, session_id)] = cwd
 
@@ -111,6 +117,41 @@ def _set_session_cwd(target_id: str, session_id: str, cwd: str) -> None:
 def _get_session_cwd(target_id: str, session_id: str, fallback: str = "") -> str:
     with _CWD_LOCK:
         return _SESSION_LAST_CWD.get((target_id, session_id), fallback)
+
+
+def _pull_lock_key(target_id: str, session_id: str | None) -> tuple[str, str]:
+    return target_id, session_id or ""
+
+
+def _get_pull_lock(target_id: str, session_id: str | None) -> threading.RLock:
+    key = _pull_lock_key(target_id, session_id)
+
+    with _PULL_LOCKS_LOCK:
+        lock = _PULL_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PULL_LOCKS[key] = lock
+        return lock
+
+
+def _response_seen_key(target_id: str, response_id: str) -> tuple[str, str]:
+    return target_id, response_id
+
+
+def _is_response_seen(target_id: str, response_id: str) -> bool:
+    if not response_id:
+        return False
+
+    with _SEEN_RESPONSES_LOCK:
+        return _response_seen_key(target_id, response_id) in _SEEN_RESPONSE_IDS
+
+
+def _mark_response_seen(target_id: str, response_id: str) -> None:
+    if not response_id:
+        return
+
+    with _SEEN_RESPONSES_LOCK:
+        _SEEN_RESPONSE_IDS.add(_response_seen_key(target_id, response_id))
 
 
 def _print_response_payload(payload: dict[str, Any]) -> None:
@@ -138,65 +179,102 @@ def _print_response_payload(payload: dict[str, Any]) -> None:
         _safe_print(f"[error={error}]")
 
 
+def _ack_responses(
+    target_id: str,
+    response_ids: list[str],
+    *,
+    quiet: bool = False,
+) -> bool:
+    clean_ids = [str(item).strip() for item in response_ids if str(item).strip()]
+    if not clean_ids:
+        return True
+
+    ack_status, ack_raw = _request(
+        "POST",
+        target_id,
+        "/ack_response",
+        payload={"response_ids": clean_ids},
+    )
+
+    if ack_status != 200:
+        if not quiet:
+            _safe_print(f"[{ack_status}] failed to ack pulled results: {ack_raw}")
+        return False
+
+    return True
+
+
 def _pull_pending_results(
     target_id: str,
     session_id: str | None = None,
     *,
     quiet: bool = False,
 ) -> int:
-    query = {"session_id": session_id} if session_id else None
+    pull_lock = _get_pull_lock(target_id, session_id)
 
-    status, raw = _request(
-        "GET",
-        target_id,
-        "/pull_pending_results",
-        extra_query=query,
-    )
-
-    if status != 200:
-        if not quiet:
-            _safe_print(f"[{status}] failed to pull pending results: {raw}")
+    acquired = pull_lock.acquire(blocking=False)
+    if not acquired:
         return 0
 
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        if not quiet:
-            _safe_print(f"[502] invalid JSON from server: {raw}")
-        return 0
+        query = {"session_id": session_id} if session_id else None
 
-    responses = data.get("responses", [])
-    if not isinstance(responses, list):
-        return 0
-
-    response_ids: list[str] = []
-
-    for item in responses:
-        if not isinstance(item, dict):
-            continue
-
-        _print_response_payload(item)
-
-        response_session_id = str(item.get("session_id", "")).strip()
-        response_cwd = str(item.get("cwd", "")).strip()
-        if response_session_id and response_cwd:
-            _set_session_cwd(target_id, response_session_id, response_cwd)
-
-        response_id = str(item.get("response_id", "")).strip()
-        if response_id:
-            response_ids.append(response_id)
-
-    if response_ids:
-        ack_status, ack_raw = _request(
-            "POST",
+        status, raw = _request(
+            "GET",
             target_id,
-            "/ack_response",
-            payload={"response_ids": response_ids},
+            "/pull_pending_results",
+            extra_query=query,
         )
-        if ack_status != 200 and not quiet:
-            _safe_print(f"[{ack_status}] failed to ack pulled results: {ack_raw}")
 
-    return len(response_ids)
+        if status != 200:
+            if not quiet:
+                _safe_print(f"[{status}] failed to pull pending results: {raw}")
+            return 0
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            if not quiet:
+                _safe_print(f"[502] invalid JSON from server: {raw}")
+            return 0
+
+        responses = data.get("responses", [])
+        if not isinstance(responses, list):
+            return 0
+
+        response_ids_to_ack: list[str] = []
+        printed_count = 0
+
+        for item in responses:
+            if not isinstance(item, dict):
+                continue
+
+            response_id = str(item.get("response_id", "")).strip()
+            if not response_id:
+                continue
+
+            response_ids_to_ack.append(response_id)
+
+            if _is_response_seen(target_id, response_id):
+                continue
+
+            _mark_response_seen(target_id, response_id)
+            _print_response_payload(item)
+            printed_count += 1
+
+            response_session_id = str(item.get("session_id", "")).strip()
+            response_cwd = str(item.get("cwd", "")).strip()
+
+            if response_session_id and response_cwd:
+                _set_session_cwd(target_id, response_session_id, response_cwd)
+
+        if response_ids_to_ack:
+            _ack_responses(target_id, response_ids_to_ack, quiet=quiet)
+
+        return printed_count
+
+    finally:
+        pull_lock.release()
 
 
 def _poll_interval_for_mode(mode: str) -> float:
@@ -308,11 +386,13 @@ def open_shell(target_id: str) -> tuple[str | None, str | None]:
     _set_session_cwd(target_id, session_id, cwd)
     _start_or_update_result_poller(target_id, session_id, "active")
     _pull_pending_results(target_id, session_id, quiet=True)
+
     return session_id, cwd
 
 
 def list_sessions(target_id: str) -> list[dict[str, Any]] | None:
     status, raw = _request("GET", target_id, "/list_sessions")
+
     if status != 200:
         _safe_print(f"[{status}] {raw}")
         return None
@@ -341,6 +421,7 @@ def attach_shell(target_id: str, session_id: str) -> bool:
         return False
 
     matched_session: dict[str, Any] | None = None
+
     for item in sessions:
         if str(item.get("session_id", "")) == session_id:
             matched_session = item
@@ -352,8 +433,10 @@ def attach_shell(target_id: str, session_id: str) -> bool:
 
     cwd = str(matched_session.get("cwd", ""))
     _set_session_cwd(target_id, session_id, cwd)
+
     _start_or_update_result_poller(target_id, session_id, "active")
     _pull_pending_results(target_id, session_id, quiet=True)
+
     return True
 
 
@@ -383,6 +466,7 @@ def get_session_jobs(target_id: str, session_id: str) -> dict[str, Any] | None:
         "/session_jobs",
         extra_query={"session_id": session_id},
     )
+
     if status != 200:
         _safe_print(f"[{status}] {raw}")
         return None
@@ -482,6 +566,7 @@ def interactive_shell(
     else:
         if not attach_shell(target_id, existing_session_id):
             return
+
         session_id = existing_session_id
         current_dir = existing_cwd or ""
         _set_session_cwd(target_id, session_id, current_dir)
@@ -494,6 +579,7 @@ def interactive_shell(
     close_remote_on_exit = False
 
     _start_or_update_result_poller(target_id, session_id, "active")
+
     _safe_print("Commands are queued automatically. Results are fetched from server in background.")
     _safe_print("Type 'help' to show available commands.")
 
@@ -547,6 +633,7 @@ def interactive_shell(
             continue
 
         status, result = send_queued_command(target_id, session_id, cmd)
+
         if status not in {200, 202}:
             _safe_print(f"[{status}] {result.get('error', '')}")
             continue
@@ -562,6 +649,7 @@ def interactive_shell(
     if close_remote_on_exit:
         status, response = close_shell(target_id, session_id)
         _stop_result_poller(target_id, session_id)
+
         if status != 200:
             _safe_print(f"[{status}] {response}")
         else:

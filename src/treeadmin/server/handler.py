@@ -19,10 +19,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self):
+        self._request_path = ""
+        self._suppress_access_log = False
+
         try:
             super().handle_one_request()
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
             self.close_connection = True
+
+    @staticmethod
+    def _is_silent_path(path: str) -> bool:
+        return path in SILENT_LOG_PATHS
+
+    def _prepare_request_logging_state(self, path: str) -> bool:
+        self._request_path = path
+        self._suppress_access_log = self._is_silent_path(path)
+        return self._suppress_access_log
 
     def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)
@@ -60,14 +72,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         return payload
 
-    @staticmethod
-    def _is_silent_path(path: str) -> bool:
-        return path in SILENT_LOG_PATHS
-
     def do_GET(self):
         parsed = urlparse(self.path)
+        silent = self._prepare_request_logging_state(parsed.path)
 
-        if parsed.path not in {"/hello", "/list_sessions", "/session_jobs", "/pull_pending_results"}:
+        if parsed.path not in {
+            "/hello",
+            "/list_sessions",
+            "/session_jobs",
+            "/pull_pending_results",
+        }:
             self._send_text(404, "not found")
             return
 
@@ -77,7 +91,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._send_text(400, str(e))
             return
 
-        silent = self._is_silent_path(parsed.path)
         if not silent:
             print(f"ROUTE: {format_route(hops)} | hop={hop_index}")
 
@@ -95,6 +108,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             if not silent:
                 print(f"PROXY: forward GET -> {next_host}:{next_port} {next_path}")
+
             self.server.proxy.forward(self, next_host, next_port, "GET", next_path, b"")
             return
 
@@ -119,8 +133,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/pull_pending_results":
             session_id = (qs.get("session_id") or [""])[0].strip() or None
-            if session_id:
+
+            if session_id and hasattr(self.server.sessions, "touch_session"):
                 self.server.sessions.touch_session(session_id)
+
             items = self.server.jobs.list_pending_responses(session_id=session_id)
             self._send_json(200, {"responses": items})
             return
@@ -129,6 +145,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        silent = self._prepare_request_logging_state(parsed.path)
+
         valid_paths = {
             "/open_shell",
             "/send_command",
@@ -147,7 +165,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
 
         body = self._read_body()
-        silent = self._is_silent_path(parsed.path)
+
         if not silent:
             print(f"ROUTE: {format_route(hops)} | hop={hop_index}")
 
@@ -165,6 +183,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             if not silent:
                 print(f"PROXY: forward POST -> {next_host}:{next_port} {next_path}")
+
             self.server.proxy.forward(self, next_host, next_port, "POST", next_path, body)
             return
 
@@ -190,6 +209,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if not session_id:
                 self._send_text(400, "missing 'session_id'")
                 return
+
             if not command:
                 self._send_text(400, "missing 'command'")
                 return
@@ -224,6 +244,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/ack_response":
             response_ids = payload.get("response_ids")
+
             if isinstance(response_ids, list):
                 ids = [str(item) for item in response_ids]
             else:
@@ -236,8 +257,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         self._send_text(404, "not found")
 
+    def log_request(self, code="-", size="-"):
+        if getattr(self, "_suppress_access_log", False):
+            return
+
+        super().log_request(code, size)
+
     def log_message(self, fmt, *args):
-        path = urlparse(self.path).path
+        path = getattr(self, "_request_path", "") or urlparse(self.path).path
+
         if self._is_silent_path(path):
             return
 
