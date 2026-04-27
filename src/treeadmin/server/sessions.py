@@ -36,35 +36,6 @@ class SessionManager:
         return "posix"
 
     @staticmethod
-    def _normalize_callback(callback: dict | None) -> dict | None:
-        if not isinstance(callback, dict):
-            return None
-
-        host = callback.get("host") or callback.get("callback_host")
-        port = callback.get("port") or callback.get("callback_port")
-        path = callback.get("path") or callback.get("callback_path") or "/deliver_result"
-
-        if not isinstance(host, str) or not host.strip():
-            return None
-
-        try:
-            port = int(port)
-        except Exception:
-            return None
-
-        if port <= 0:
-            return None
-
-        if not isinstance(path, str) or not path.startswith("/"):
-            path = "/deliver_result"
-
-        return {
-            "host": host.strip(),
-            "port": port,
-            "path": path,
-        }
-
-    @staticmethod
     def close_session_resources_static(session: dict) -> None:
         platform_name = session.get("platform")
         process = session.get("process")
@@ -81,14 +52,13 @@ class SessionManager:
                 except Exception:
                     pass
 
-    def open_session(self, callback: dict | None = None) -> dict:
+    def open_session(self) -> dict:
         with self._lock:
             session_id = str(self._next_session_id)
             self._next_session_id += 1
 
         platform_name = self._get_platform_name()
         now = time.time()
-        callback_info = self._normalize_callback(callback)
 
         if platform_name == "windows":
             desktop = Path.home() / "Desktop"
@@ -131,7 +101,6 @@ class SessionManager:
                 "created_at": now,
                 "last_activity": now,
                 "node_id": self.node_id,
-                "client_callback": callback_info,
             }
         else:
             start_cwd = str(Path.home())
@@ -143,7 +112,6 @@ class SessionManager:
                 "created_at": now,
                 "last_activity": now,
                 "node_id": self.node_id,
-                "client_callback": callback_info,
             }
 
         with self._lock:
@@ -153,7 +121,6 @@ class SessionManager:
             "session_id": session_id,
             "cwd": session["cwd"],
             "node_id": self.node_id,
-            "client_callback": callback_info,
         }
 
     def get_session(self, session_id: str) -> dict | None:
@@ -174,24 +141,17 @@ class SessionManager:
                     "created_at": session.get("created_at"),
                     "last_activity": session.get("last_activity"),
                     "node_id": str(session.get("node_id", self.node_id)),
-                    "client_callback": session.get("client_callback"),
                 }
             )
         return result
 
-    def update_callback(self, session_id: str, callback: dict | None) -> dict | None:
-        callback_info = self._normalize_callback(callback)
-        if callback_info is None:
-            return None
-
+    def touch_session(self, session_id: str) -> bool:
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
-                return None
-            session["client_callback"] = callback_info
+                return False
             session["last_activity"] = time.time()
-
-        return callback_info
+            return True
 
     def close_session(self, session_id: str) -> dict | None:
         with self._lock:

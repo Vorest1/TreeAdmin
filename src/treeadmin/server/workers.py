@@ -50,11 +50,6 @@ class SessionWorkers:
                     status = "failed"
                     error = str(e)
 
-                session_after = self.sessions.get_session(session_id)
-                callback = None
-                if session_after is not None:
-                    callback = session_after.get("client_callback")
-
                 self.jobs.finish_job(
                     job_id=str(claimed_job.get("job_id", "")),
                     status=status,
@@ -62,7 +57,6 @@ class SessionWorkers:
                     cwd=cwd,
                     returncode=returncode,
                     error=error,
-                    callback=callback,
                 )
         finally:
             with self._lock:

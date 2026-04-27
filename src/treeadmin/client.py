@@ -6,10 +6,8 @@ import os
 import re
 import socket
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from src.treeadmin.config import ClientConfig
 from src.treeadmin.routing import build_first_request
@@ -17,16 +15,17 @@ from src.treeadmin.routing import build_first_request
 CONFIG_PATH = Path("config/config_client.json")
 OUTPUT_FILE_RE = re.compile(r"\s+#F\[(.+?)\]F#\s*$")
 
-CALLBACK_BIND_HOST = os.getenv("TREEADMIN_CALLBACK_BIND_HOST", "0.0.0.0")
-CALLBACK_PORT = int(os.getenv("TREEADMIN_CALLBACK_PORT", "9005"))
-CALLBACK_PATH = os.getenv("TREEADMIN_CALLBACK_PATH", "/deliver_result")
-CALLBACK_HOST_OVERRIDE = os.getenv("TREEADMIN_CALLBACK_HOST", "").strip()
+ACTIVE_POLL_INTERVAL_SECONDS = float(os.getenv("TREEADMIN_ACTIVE_POLL_INTERVAL", "0.5"))
+BACKGROUND_POLL_INTERVAL_SECONDS = float(os.getenv("TREEADMIN_BACKGROUND_POLL_INTERVAL", "1.5"))
 
 _PRINT_LOCK = threading.RLock()
-_CALLBACK_SERVER_LOCK = threading.RLock()
-_CALLBACK_SERVER = None
-_CALLBACK_THREAD: threading.Thread | None = None
-_CALLBACK_STARTED = False
+_POLLERS_LOCK = threading.RLock()
+_CWD_LOCK = threading.RLock()
+
+_RESULT_POLLERS: dict[tuple[str, str], threading.Thread] = {}
+_RESULT_POLL_STOP_EVENTS: dict[tuple[str, str], threading.Event] = {}
+_RESULT_POLL_MODES: dict[tuple[str, str], str] = {}
+_SESSION_LAST_CWD: dict[tuple[str, str], str] = {}
 
 
 def _safe_print(*args, **kwargs) -> None:
@@ -34,124 +33,8 @@ def _safe_print(*args, **kwargs) -> None:
         print(*args, **kwargs)
 
 
-class _ClientCallbackHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
-
-    def __init__(self, server_address, handler_cls, callback_path: str):
-        super().__init__(server_address, handler_cls)
-        self.callback_path = callback_path
-
-
-class _ClientCallbackHandler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def _send_text(self, status: int, text: str) -> None:
-        body = text.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        if parsed.path != self.server.callback_path:
-            self._send_text(404, "not found")
-            return
-
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        body = self.rfile.read(length) if length > 0 else b""
-
-        try:
-            payload = json.loads(body.decode("utf-8"))
-        except Exception as e:
-            self._send_text(400, f"bad json: {e}")
-            return
-
-        if not isinstance(payload, dict):
-            self._send_text(400, "json body must be object")
-            return
-
-        _print_response_payload(payload, source="callback")
-        self._send_text(200, "received")
-
-    def log_message(self, fmt, *args):
-        return
-
-
-def _start_background_callback_server() -> None:
-    global _CALLBACK_SERVER, _CALLBACK_THREAD, _CALLBACK_STARTED
-
-    with _CALLBACK_SERVER_LOCK:
-        if _CALLBACK_STARTED:
-            return
-
-        server = _ClientCallbackHTTPServer(
-            (CALLBACK_BIND_HOST, CALLBACK_PORT),
-            _ClientCallbackHandler,
-            CALLBACK_PATH,
-        )
-        thread = threading.Thread(
-            target=server.serve_forever,
-            daemon=True,
-            name="client-callback-server",
-        )
-        thread.start()
-
-        _CALLBACK_SERVER = server
-        _CALLBACK_THREAD = thread
-        _CALLBACK_STARTED = True
-
-        _safe_print(
-            f"[callback] background server started on "
-            f"{CALLBACK_BIND_HOST}:{CALLBACK_PORT}{CALLBACK_PATH}"
-        )
-
-
 def _load_client_config() -> ClientConfig:
     return ClientConfig.load(CONFIG_PATH)
-
-
-def _guess_callback_host(target_id: str) -> str:
-    if CALLBACK_HOST_OVERRIDE:
-        return CALLBACK_HOST_OVERRIDE
-
-    try:
-        client_config = _load_client_config()
-        host, port, _ = build_first_request(
-            client_config=client_config,
-            target_node_id=target_id,
-            endpoint_path="/hello",
-            extra_query={"msg": "discover"},
-        )
-
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect((host, port))
-            ip = s.getsockname()[0]
-            if ip:
-                return ip
-    except Exception:
-        pass
-
-    return "127.0.0.1"
-
-
-def _get_callback_info(target_id: str) -> dict[str, Any]:
-    _start_background_callback_server()
-    return {
-        "host": _guess_callback_host(target_id),
-        "port": CALLBACK_PORT,
-        "path": CALLBACK_PATH,
-    }
-
-
-def ensure_client_background_services(target_id: str = "pc2") -> dict[str, Any]:
-    callback = _get_callback_info(target_id)
-    _safe_print(
-        f"[callback] background server active; advertised as "
-        f"{callback['host']}:{callback['port']}{callback['path']}"
-    )
-    return callback
 
 
 def _request(
@@ -218,7 +101,19 @@ def _save_command_output(output_path: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _print_response_payload(payload: dict[str, Any], source: str = "callback") -> None:
+def _set_session_cwd(target_id: str, session_id: str, cwd: str) -> None:
+    if not cwd:
+        return
+    with _CWD_LOCK:
+        _SESSION_LAST_CWD[(target_id, session_id)] = cwd
+
+
+def _get_session_cwd(target_id: str, session_id: str, fallback: str = "") -> str:
+    with _CWD_LOCK:
+        return _SESSION_LAST_CWD.get((target_id, session_id), fallback)
+
+
+def _print_response_payload(payload: dict[str, Any]) -> None:
     node_id = str(payload.get("node_id", "unknown-node"))
     session_id = str(payload.get("session_id", ""))
     job_id = str(payload.get("job_id", ""))
@@ -229,10 +124,7 @@ def _print_response_payload(payload: dict[str, Any], source: str = "callback") -
     returncode = payload.get("returncode")
     error = payload.get("error")
 
-    prefix = f"\n[from {node_id}][session {session_id}][job {job_id}] {command}"
-    if source == "pull":
-        prefix += " [pulled]"
-    _safe_print(prefix)
+    _safe_print(f"\n[from {node_id}][session {session_id}][job {job_id}] {command}")
 
     if status:
         _safe_print(f"[status={status}]")
@@ -246,7 +138,12 @@ def _print_response_payload(payload: dict[str, Any], source: str = "callback") -
         _safe_print(f"[error={error}]")
 
 
-def _pull_pending_results(target_id: str, session_id: str | None = None) -> int:
+def _pull_pending_results(
+    target_id: str,
+    session_id: str | None = None,
+    *,
+    quiet: bool = False,
+) -> int:
     query = {"session_id": session_id} if session_id else None
 
     status, raw = _request(
@@ -257,13 +154,15 @@ def _pull_pending_results(target_id: str, session_id: str | None = None) -> int:
     )
 
     if status != 200:
-        _safe_print(f"[{status}] failed to pull pending results: {raw}")
+        if not quiet:
+            _safe_print(f"[{status}] failed to pull pending results: {raw}")
         return 0
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        _safe_print(f"[502] invalid JSON from server: {raw}")
+        if not quiet:
+            _safe_print(f"[502] invalid JSON from server: {raw}")
         return 0
 
     responses = data.get("responses", [])
@@ -275,7 +174,14 @@ def _pull_pending_results(target_id: str, session_id: str | None = None) -> int:
     for item in responses:
         if not isinstance(item, dict):
             continue
-        _print_response_payload(item, source="pull")
+
+        _print_response_payload(item)
+
+        response_session_id = str(item.get("session_id", "")).strip()
+        response_cwd = str(item.get("cwd", "")).strip()
+        if response_session_id and response_cwd:
+            _set_session_cwd(target_id, response_session_id, response_cwd)
+
         response_id = str(item.get("response_id", "")).strip()
         if response_id:
             response_ids.append(response_id)
@@ -287,40 +193,96 @@ def _pull_pending_results(target_id: str, session_id: str | None = None) -> int:
             "/ack_response",
             payload={"response_ids": response_ids},
         )
-        if ack_status != 200:
+        if ack_status != 200 and not quiet:
             _safe_print(f"[{ack_status}] failed to ack pulled results: {ack_raw}")
 
     return len(response_ids)
 
 
-def _register_callback(target_id: str, session_id: str) -> bool:
-    callback = _get_callback_info(target_id)
+def _poll_interval_for_mode(mode: str) -> float:
+    if mode == "active":
+        return ACTIVE_POLL_INTERVAL_SECONDS
+    return BACKGROUND_POLL_INTERVAL_SECONDS
 
-    status, raw = _request(
-        "POST",
-        target_id,
-        "/register_callback",
-        payload={
-            "session_id": session_id,
-            "client_callback": callback,
-        },
-    )
 
-    if status != 200:
-        _safe_print(f"[{status}] failed to register callback: {raw}")
-        return False
+def _result_poller_loop(
+    target_id: str,
+    session_id: str,
+    stop_event: threading.Event,
+) -> None:
+    key = (target_id, session_id)
 
-    return True
+    while not stop_event.is_set():
+        try:
+            _pull_pending_results(target_id, session_id, quiet=True)
+        except Exception:
+            pass
+
+        with _POLLERS_LOCK:
+            mode = _RESULT_POLL_MODES.get(key, "background")
+
+        stop_event.wait(_poll_interval_for_mode(mode))
+
+
+def _start_or_update_result_poller(target_id: str, session_id: str, mode: str) -> None:
+    if mode not in {"active", "background"}:
+        raise ValueError("poller mode must be 'active' or 'background'")
+
+    key = (target_id, session_id)
+
+    with _POLLERS_LOCK:
+        _RESULT_POLL_MODES[key] = mode
+
+        thread = _RESULT_POLLERS.get(key)
+        if thread is not None and thread.is_alive():
+            return
+
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=_result_poller_loop,
+            args=(target_id, session_id, stop_event),
+            daemon=True,
+            name=f"result-poller-{target_id}-{session_id}",
+        )
+
+        _RESULT_POLL_STOP_EVENTS[key] = stop_event
+        _RESULT_POLLERS[key] = thread
+        thread.start()
+
+
+def _stop_result_poller(target_id: str, session_id: str) -> None:
+    key = (target_id, session_id)
+
+    with _POLLERS_LOCK:
+        stop_event = _RESULT_POLL_STOP_EVENTS.pop(key, None)
+        _RESULT_POLLERS.pop(key, None)
+        _RESULT_POLL_MODES.pop(key, None)
+
+    if stop_event is not None:
+        stop_event.set()
+
+
+def _stop_all_result_pollers() -> None:
+    with _POLLERS_LOCK:
+        items = list(_RESULT_POLL_STOP_EVENTS.items())
+        _RESULT_POLL_STOP_EVENTS.clear()
+        _RESULT_POLLERS.clear()
+        _RESULT_POLL_MODES.clear()
+
+    for _, stop_event in items:
+        stop_event.set()
+
+
+def ensure_client_background_services(target_id: str = "pc2") -> None:
+    return None
 
 
 def open_shell(target_id: str) -> tuple[str | None, str | None]:
-    callback = _get_callback_info(target_id)
-
     status, raw = _request(
         "POST",
         target_id,
         "/open_shell",
-        payload={"client_callback": callback},
+        payload={},
     )
 
     if status != 200:
@@ -343,7 +305,9 @@ def open_shell(target_id: str) -> tuple[str | None, str | None]:
     if not isinstance(cwd, str):
         cwd = ""
 
-    _pull_pending_results(target_id, session_id)
+    _set_session_cwd(target_id, session_id, cwd)
+    _start_or_update_result_poller(target_id, session_id, "active")
+    _pull_pending_results(target_id, session_id, quiet=True)
     return session_id, cwd
 
 
@@ -376,14 +340,20 @@ def attach_shell(target_id: str, session_id: str) -> bool:
     if sessions is None:
         return False
 
-    if session_id not in {str(item.get("session_id", "")) for item in sessions}:
+    matched_session: dict[str, Any] | None = None
+    for item in sessions:
+        if str(item.get("session_id", "")) == session_id:
+            matched_session = item
+            break
+
+    if matched_session is None:
         _safe_print(f"Session not found on server: {session_id}")
         return False
 
-    if not _register_callback(target_id, session_id):
-        return False
-
-    _pull_pending_results(target_id, session_id)
+    cwd = str(matched_session.get("cwd", ""))
+    _set_session_cwd(target_id, session_id, cwd)
+    _start_or_update_result_poller(target_id, session_id, "active")
+    _pull_pending_results(target_id, session_id, quiet=True)
     return True
 
 
@@ -475,9 +445,7 @@ def _print_session_jobs(data: dict[str, Any]) -> None:
         for item in response_items:
             _safe_print(
                 f"  [response {item.get('response_id')}] "
-                f"status={item.get('delivery_status')} "
-                f"attempts={item.get('delivery_attempts')} "
-                f":: {item.get('command')}"
+                f"job={item.get('job_id')} :: {item.get('command')}"
             )
 
 
@@ -491,15 +459,7 @@ def _print_sessions(sessions: list[dict[str, Any]]) -> None:
         session_id = str(item.get("session_id", ""))
         platform_name = str(item.get("platform", ""))
         cwd = str(item.get("cwd", ""))
-        callback = item.get("client_callback")
-        callback_text = ""
-        if isinstance(callback, dict):
-            callback_text = (
-                f" callback={callback.get('host')}:{callback.get('port')}{callback.get('path')}"
-            )
-        _safe_print(
-            f"  session_id={session_id} platform={platform_name} cwd={cwd}{callback_text}"
-        )
+        _safe_print(f"  session_id={session_id} platform={platform_name} cwd={cwd}")
 
 
 def _print_help() -> None:
@@ -507,7 +467,7 @@ def _print_help() -> None:
     _safe_print("  help      show this help")
     _safe_print("  jobs      show queued and completed commands in this session")
     _safe_print("  sessions  show active sessions on current server")
-    _safe_print("  pull      fetch undelivered results from server")
+    _safe_print("  pull      fetch undelivered results from server now")
     _safe_print("  exit      leave this shell window, keep remote session alive")
     _safe_print("  close     close remote session and leave")
 
@@ -524,6 +484,7 @@ def interactive_shell(
             return
         session_id = existing_session_id
         current_dir = existing_cwd or ""
+        _set_session_cwd(target_id, session_id, current_dir)
 
     if not session_id:
         _safe_print("Failed to open shell session")
@@ -532,13 +493,16 @@ def interactive_shell(
     current_dir = current_dir or ""
     close_remote_on_exit = False
 
-    _safe_print("Commands are queued automatically. Results arrive via background callback server.")
+    _start_or_update_result_poller(target_id, session_id, "active")
+    _safe_print("Commands are queued automatically. Results are fetched from server in background.")
     _safe_print("Type 'help' to show available commands.")
 
     while True:
         try:
-            raw_cmd = input(f"[{target_id}][session {session_id}] {current_dir} > ").strip()
+            prompt_dir = _get_session_cwd(target_id, session_id, current_dir)
+            raw_cmd = input(f"[{target_id}][session {session_id}] {prompt_dir} > ").strip()
         except KeyboardInterrupt:
+            _start_or_update_result_poller(target_id, session_id, "background")
             _safe_print(f"\nLeft session {session_id}. Remote session is still active.")
             return
 
@@ -564,11 +528,12 @@ def interactive_shell(
             continue
 
         if lowered in {"pull", ":pull"}:
-            count = _pull_pending_results(target_id, session_id)
+            count = _pull_pending_results(target_id, session_id, quiet=False)
             _safe_print(f"Pulled responses: {count}")
             continue
 
         if lowered in {"exit", "quit", ":leave", "leave"}:
+            _start_or_update_result_poller(target_id, session_id, "background")
             _safe_print(f"Left session {session_id}. Remote session is still active.")
             return
 
@@ -596,6 +561,7 @@ def interactive_shell(
 
     if close_remote_on_exit:
         status, response = close_shell(target_id, session_id)
+        _stop_result_poller(target_id, session_id)
         if status != 200:
             _safe_print(f"[{status}] {response}")
         else:
@@ -604,11 +570,6 @@ def interactive_shell(
 
 def run_client() -> None:
     target_id = input("Target server node id (for example pc2): ").strip() or "pc2"
-
-    try:
-        ensure_client_background_services(target_id)
-    except Exception as e:
-        _safe_print(f"[callback] failed to start background callback server: {e}")
 
     try:
         status, body = ping_server(target_id)

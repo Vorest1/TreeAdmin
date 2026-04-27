@@ -32,11 +32,9 @@ class CleanupService:
             expired = self.sessions.pop_expired_sessions()
             for session_id, session in expired:
                 try:
-                    callback = session.get("client_callback")
                     self.jobs.cancel_queued_for_session(
                         session_id,
                         "session expired by inactivity timeout",
-                        callback=callback,
                     )
                     self.sessions.close_session_resources_static(session)
                     print(f"SESSION TIMEOUT: closed inactive session {session_id}")

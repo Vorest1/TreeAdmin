@@ -1,15 +1,18 @@
 {
   "timeout": 10,
-  "default_port": 8000,
   "root_id": "pc1",
   "nodes": {
     "pc1": {
-      "children": ["pc2"]
+      "children": [
+        "pc2"
+      ]
     },
     "pc2": {
       "host": "127.0.0.1",
-      "port": 8000,
-      "children" : ["pc3"]
+      "port":8000,
+      "children" : [
+        "pc3"
+      ]
     },
     "pc3": {
       "host": "72.56.4.93",

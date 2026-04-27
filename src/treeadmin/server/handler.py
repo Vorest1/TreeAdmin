@@ -9,6 +9,12 @@ from urllib.parse import urlparse
 from src.treeadmin.routing import build_forward_request, format_route, is_final_hop
 
 
+SILENT_LOG_PATHS = {
+    "/pull_pending_results",
+    "/ack_response",
+}
+
+
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -55,25 +61,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         return payload
 
     @staticmethod
-    def _extract_callback(payload: dict) -> dict | None:
-        if not isinstance(payload, dict):
-            return None
-
-        if isinstance(payload.get("client_callback"), dict):
-            return payload["client_callback"]
-
-        host = payload.get("callback_host")
-        port = payload.get("callback_port")
-        path = payload.get("callback_path")
-
-        if host is None and port is None and path is None:
-            return None
-
-        return {
-            "host": host,
-            "port": port,
-            "path": path or "/deliver_result",
-        }
+    def _is_silent_path(path: str) -> bool:
+        return path in SILENT_LOG_PATHS
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -88,7 +77,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._send_text(400, str(e))
             return
 
-        print(f"ROUTE: {format_route(hops)} | hop={hop_index}")
+        silent = self._is_silent_path(parsed.path)
+        if not silent:
+            print(f"ROUTE: {format_route(hops)} | hop={hop_index}")
 
         if not is_final_hop(hops, hop_index):
             try:
@@ -102,7 +93,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self._send_text(500, f"route forward error: {e}")
                 return
 
-            print(f"PROXY: forward GET -> {next_host}:{next_port} {next_path}")
+            if not silent:
+                print(f"PROXY: forward GET -> {next_host}:{next_port} {next_path}")
             self.server.proxy.forward(self, next_host, next_port, "GET", next_path, b"")
             return
 
@@ -127,6 +119,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/pull_pending_results":
             session_id = (qs.get("session_id") or [""])[0].strip() or None
+            if session_id:
+                self.server.sessions.touch_session(session_id)
             items = self.server.jobs.list_pending_responses(session_id=session_id)
             self._send_json(200, {"responses": items})
             return
@@ -137,7 +131,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         valid_paths = {
             "/open_shell",
-            "/register_callback",
             "/send_command",
             "/close_shell",
             "/ack_response",
@@ -154,7 +147,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
 
         body = self._read_body()
-        print(f"ROUTE: {format_route(hops)} | hop={hop_index}")
+        silent = self._is_silent_path(parsed.path)
+        if not silent:
+            print(f"ROUTE: {format_route(hops)} | hop={hop_index}")
 
         if not is_final_hop(hops, hop_index):
             try:
@@ -168,7 +163,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self._send_text(500, f"route forward error: {e}")
                 return
 
-            print(f"PROXY: forward POST -> {next_host}:{next_port} {next_path}")
+            if not silent:
+                print(f"PROXY: forward POST -> {next_host}:{next_port} {next_path}")
             self.server.proxy.forward(self, next_host, next_port, "POST", next_path, body)
             return
 
@@ -180,41 +176,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/open_shell":
             try:
-                callback = self._extract_callback(payload)
-                session_info = self.server.sessions.open_session(callback=callback)
+                session_info = self.server.sessions.open_session()
                 self.server.workers.ensure_worker(str(session_info["session_id"]))
-                if callback is not None:
-                    self.server.jobs.update_callback_for_session(
-                        str(session_info["session_id"]),
-                        callback,
-                    )
                 self._send_json(200, session_info)
             except Exception as e:
                 self._send_text(500, f"open shell error: {e}")
-            return
-
-        if parsed.path == "/register_callback":
-            session_id = str(payload.get("session_id", "")).strip()
-            if not session_id:
-                self._send_text(400, "missing 'session_id'")
-                return
-
-            callback = self._extract_callback(payload)
-            callback_info = self.server.sessions.update_callback(session_id, callback)
-            if callback_info is None:
-                self._send_text(404, "session not found or invalid callback")
-                return
-
-            self.server.jobs.update_callback_for_session(session_id, callback_info)
-            self.server.delivery.wake()
-            self._send_json(
-                200,
-                {
-                    "session_id": session_id,
-                    "client_callback": callback_info,
-                    "status": "registered",
-                },
-            )
             return
 
         if parsed.path == "/send_command":
@@ -252,13 +218,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self._send_text(404, "session not found")
                 return
 
-            callback = session.get("client_callback")
-            self.server.jobs.cancel_queued_for_session(
-                session_id,
-                "session closed",
-                callback=callback,
-            )
-            self.server.delivery.wake()
+            self.server.jobs.cancel_queued_for_session(session_id, "session closed")
             self._send_text(200, "shell closed")
             return
 
@@ -277,8 +237,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._send_text(404, "not found")
 
     def log_message(self, fmt, *args):
+        path = urlparse(self.path).path
+        if self._is_silent_path(path):
+            return
+
         sys.stdout.write(
             f'[{datetime.now().strftime("%d.%m.%Y %H:%M:%S")}] '
             f'[NODE {self.client_address[0]}] '
-            f'{self.command} {urlparse(self.path).path}\n'
+            f'{self.command} {path}\n'
         )

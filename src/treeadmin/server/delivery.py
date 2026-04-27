@@ -61,7 +61,8 @@ class DeliveryService:
             resp = conn.getresponse()
             resp.read()
             return 200 <= resp.status < 300
-        except Exception:
+        except Exception as e:
+            print(f"DELIVERY ERROR: cannot deliver to {host}:{port}{path}: {e}")
             return False
         finally:
             try:

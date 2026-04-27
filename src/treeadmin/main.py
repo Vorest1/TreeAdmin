@@ -3,8 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 from src.treeadmin.client import (
-    close_shell,
-    ensure_client_background_services,
     interactive_shell,
     list_sessions,
     ping_server,
@@ -232,11 +230,6 @@ def _show_topology_menu() -> None:
 
 
 def _client_menu() -> None:
-    try:
-        ensure_client_background_services("pc2")
-    except Exception as e:
-        print(f"Failed to start client background services: {e}")
-
     try:
         while True:
             print("\nClient menu:")
