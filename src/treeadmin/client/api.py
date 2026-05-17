@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import socket
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ from src.treeadmin.config import ClientConfig
 from src.treeadmin.routing import build_first_request
 
 CONFIG_PATH = Path("config/config_client.json")
+
+logger = logging.getLogger(__name__)
 
 
 def load_client_config() -> ClientConfig:
@@ -25,28 +28,51 @@ def request(
     extra_query: dict[str, Any] | None = None,
     timeout: int | None = None,
 ) -> tuple[int, str]:
-    client_config = load_client_config()
+    try:
+        client_config = load_client_config()
 
-    host, port, url_path = build_first_request(
-        client_config=client_config,
-        target_node_id=target_id,
-        endpoint_path=endpoint_path,
-        extra_query=extra_query,
-    )
+        host, port, url_path = build_first_request(
+            client_config=client_config,
+            target_node_id=target_id,
+            endpoint_path=endpoint_path,
+            extra_query=extra_query,
+        )
+    except Exception:
+        # log
+        logger.exception(
+            "Client request prepare failed : method=%s target_id=%s endpoint_path=%s",
+            method,
+            target_id,
+            endpoint_path
+        )
+        #
+        raise
 
     body = b""
     headers: dict[str, str] = {}
 
-    if payload is not None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers["Content-Type"] = "application/json; charset=utf-8"
+    try:
+        if payload is not None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json; charset=utf-8"
+    except Exception:
+        # log
+        logger.exception(
+            "Client request payload encode failed : method=%s target_id=%s endpoint_path=%s",
+            method,
+            target_id,
+            endpoint_path
+        )
+        #
+        raise
 
     headers["Content-Length"] = str(len(body))
+    effective_timeout = timeout if timeout is not None else client_config.timeout
 
     conn = http.client.HTTPConnection(
         host,
         port,
-        timeout=timeout if timeout is not None else client_config.timeout,
+        timeout=effective_timeout,
     )
 
     try:
@@ -55,11 +81,50 @@ def request(
         raw = resp.read().decode("utf-8", errors="replace")
         return resp.status, raw
     except socket.timeout:
+        # log
+        logger.warning(
+            "Client request timeout : method=%s target_id=%s endpoint_path=%s "
+            "host=%s:%s timeout=%s",
+            method,
+            target_id,
+            endpoint_path,
+            host,
+            port,
+            effective_timeout
+        )
+        #
         return 408, "request timeout: server did not respond in time"
+    
     except OSError as e:
+        # log
+        logger.warning(
+            "Client connection error : method=%s target_id=%s endpoint_path=%s "
+            "host=%s port=%s error=%s",
+            method,
+            target_id,
+            endpoint_path,
+            host,
+            port,
+            e
+        )
+        #
         return 503, f"connection error: {e}"
+    
     except Exception as e:
+        # log
+        logger.exception(
+            "Clietn request failed : method=%s target_id=%s endpoint_path=%s "
+            "host=%s port=%s body_size=%s",
+            method,
+            target_id,
+            endpoint_path,
+            host,
+            port,
+            len(body)
+        )
+        #
         return 500, f"client error: {e}"
+    
     finally:
         try:
             conn.close()
@@ -71,9 +136,22 @@ def decode_json_response(raw: str) -> dict[str, Any] | None:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
+        # log
+        logger.warning(
+            "Client invalid json response : response_size=%s",
+            len(str(raw).encode("utf-8", errors="replace"))
+        )
+        #
         return None
 
     if not isinstance(data, dict):
+        # log
+        logger.warning(
+            "Client invalid json response type : response_type=%s response_size=%s",
+            type(data).__name__,
+            len(str(raw).encode("utf-8", errors="replace"))
+        )
+        #
         return None
 
     return data
@@ -132,6 +210,13 @@ def list_sessions(target_id: str) -> list[dict[str, Any]] | None:
 
     sessions = data.get("sessions", [])
     if not isinstance(sessions, list):
+        # log
+        logger.warning(
+            "Client invalid sessions response : target_id=%s response_type=%s",
+            target_id,
+            type(sessions).__name__
+        )
+        #
         return None
 
     result: list[dict[str, Any]] = []
@@ -236,6 +321,14 @@ def pull_pending_results_raw(
 
     responses = data.get("responses", [])
     if not isinstance(responses, list):
+        # log
+        logger.warning(
+            "Client invalid pending responses list : target_id=%s session_id=%s response_type=%s",
+            target_id,
+            session_id,
+            type(responses).__name__
+        )
+        #
         return 502, "server returned invalid responses list"
 
     result: list[dict[str, Any]] = []
