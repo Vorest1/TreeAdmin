@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import logging
 from urllib.parse import parse_qs
 
 from src.treeadmin.routing import (
@@ -8,6 +9,7 @@ from src.treeadmin.routing import (
     parse_route_params,
 )
 
+logger = logging.getLogger(__name__)
 
 class ProxySupport:
     def extract_extra_query(self, qs: dict[str, list[str]]) -> dict[str, str]:
@@ -18,20 +20,65 @@ class ProxySupport:
                 continue
             extra[key] = values[0] if values else ""
 
+        # log
+        if extra:
+            logger.debug(
+                "extract_extra_query keys=%s",
+                sorted(extra.keys()),
+            )
+        #
+
         return extra
 
     def resolve_route(self, parsed):
-        qs = parse_qs(parsed.query, keep_blank_values=True)
-        hops, hop_index = parse_route_params(qs)
+        try:
+            qs = parse_qs(parsed.query, keep_blank_values=True)
+            hops, hop_index = parse_route_params(qs)
 
-        if not hops:
-            raise ValueError("empty route")
+            if not hops:
+                raise ValueError("empty route")
 
-        get_current_hop(hops, hop_index)
-        return qs, hops, hop_index
+            cur_hop = get_current_hop(hops, hop_index)
+
+            # log
+            logger.debug(
+                    "resolve_route path=%s hop_index=%s hops_count=%s current_host=%s current_port=%s",
+                    parsed.path,
+                    hop_index,
+                    len(hops),
+                    cur_hop.get("host"),
+                    cur_hop.get("port"),
+                )
+            #
+
+            return qs, hops, hop_index
+        # log
+        except ValueError:
+            attr = getattr(parsed, "path", "")
+            text = str(attr)
+            if len(text) > 500:
+                text[: 500 - 3] + "..."
+
+            logger.warning(
+                "proxy_route_resolve_failed path=%s query=%s",
+                attr,
+                text,
+                exc_info=True,
+            )
+            raise
+        #
 
     def forward(self, handler, host: str, port: int, method: str, path: str, body: bytes) -> None:
         conn = http.client.HTTPConnection(host, port, timeout=60)
+        
+        #log
+        logger.info(
+            "proxy is open: method=%s, host:port=%s:%s",
+            method,
+            host,
+            port
+            )
+        #
 
         try:
             headers: dict[str, str] = {}
@@ -54,9 +101,26 @@ class ProxySupport:
             handler.wfile.write(resp_body)
 
         except Exception as e:
+            logger.error("proxy error: %s", e)
             handler._send_text(502, f"proxy error: {e}")
         finally:
             try:
                 conn.close()
+                
+                # log
+                logger.info(
+                    "proxy is close: host:port=%s:%s",
+                    host,
+                    port
+                )
+                #
             except Exception:
-                pass
+                #pass
+                # log
+                logger.debug(
+                    "proxy close failed host=%s port=%s",
+                    host,
+                    port,
+                    exc_info=True,
+                )
+                #

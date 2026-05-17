@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
+logger = logging.getLogger(__name__)
+audit_logger = logging.getLogger("treeadmin.audit")
 
 class SessionWorkers:
     def __init__(self, sessions, jobs) -> None:
@@ -11,10 +14,21 @@ class SessionWorkers:
         self._workers: dict[str, threading.Thread] = {}
         self._lock = threading.RLock()
 
+        # log
+        logger.debug("session worker Initialized")
+        #
+
     def ensure_worker(self, session_id: str) -> None:
         with self._lock:
             thread = self._workers.get(session_id)
             if thread is not None and thread.is_alive():
+                # log
+                logger.debug(
+                    "session worker already running : session_id=%s, thread_name=%s",
+                    session_id,
+                    thread.name
+                )
+                #
                 return
 
             worker = threading.Thread(
@@ -24,7 +38,25 @@ class SessionWorkers:
                 name=f"session-worker-{session_id}",
             )
             self._workers[session_id] = worker
-            worker.start()
+            #worker.start()
+            # log
+            try:
+                worker.start()
+            except Exception:
+                self._workers.pop(session_id, None)
+                logger.exception(
+                    "session worker start failed : session_id=%s thread_name=%s",
+                    session_id,
+                    worker.name,
+                )
+                raise
+
+            logger.info(
+                "session worker started : session_id=%s thread_name=%s",
+                session_id,
+                worker.name,
+            )
+            #
 
     def _worker_loop(self, session_id: str) -> None:
         try:
@@ -58,6 +90,20 @@ class SessionWorkers:
                     returncode=returncode,
                     error=error,
                 )
+
+                # log
+                logger.info(
+                    "session worker finished : command=[%s]",
+                    str(claimed_job.get("command", ""))
+                )
+                #
         finally:
             with self._lock:
+                # log
+                logger.info(
+                    "session worker stopped : session_id=%s thread_name=%s",
+                    session_id,
+                    self._workers[session_id]
+                )
+                #
                 self._workers.pop(session_id, None)

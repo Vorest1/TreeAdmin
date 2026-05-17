@@ -32,7 +32,6 @@ pip-delete-this-directory.txt
 .pytest_cache/
 .coverage
 coverage.xml
-server_jobs.json
 htmlcov/
 
 # =========================
@@ -65,6 +64,8 @@ Thumbs.db
 # =========================
 *.log
 logs/
+data/
+results/
 
 # =========================
 # Temporary files

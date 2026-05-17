@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
@@ -8,12 +9,14 @@ from urllib.parse import urlparse
 
 from src.treeadmin.routing import build_forward_request, format_route, is_final_hop
 
+logger = logging.getLogger(__name__)
+audit_logger = logging.getLogger("treeadmin.audit")
 
 SILENT_LOG_PATHS = {
     "/pull_pending_results",
     "/ack_response",
+    "/results_summary",
 }
-
 
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -25,6 +28,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
         try:
             super().handle_one_request()
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
+            # log
+            logger.debug(
+                "http connection closed : client_ip=%s",
+                self.client_address[0] if self.client_address else "",
+                exc_info=True
+            )
+            #
             self.close_connection = True
 
     @staticmethod
@@ -48,7 +58,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, data: dict) -> None:
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self._send_bytes(status, body, "application/json; charset=utf-8")
+        self._send_bytes(body=body, status=status, content_type="application/json; charset=utf-8")
 
     def _read_body(self) -> bytes:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -75,23 +85,47 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         silent = self._prepare_request_logging_state(parsed.path)
+        client_ip = self.client_address[0] if self.client_address else ""
 
         if parsed.path not in {
             "/hello",
             "/list_sessions",
             "/session_jobs",
             "/pull_pending_results",
+            "/results_summary",
         }:
+            # log
+            logger.warning(
+                "http get not found : path=%s client_ip=%s",
+                parsed.path,
+                client_ip
+            )
+            #
             self._send_text(404, "not found")
             return
 
         try:
             qs, hops, hop_index = self.server.proxy.resolve_route(parsed)
         except ValueError as e:
+            # log
+            logger.warning(
+                "http get route resolve failed : path=%s client_ip=%s error=%s",
+                parsed.path,
+                client_ip,
+                e
+            )
+            #
             self._send_text(400, str(e))
             return
 
         if not silent:
+            # log
+            logger.debug(
+                "http get received : path=%s client_ip=%s",
+                parsed.path,
+                client_ip,
+            )
+            #
             print(f"ROUTE: {format_route(hops)} | hop={hop_index}")
 
         if not is_final_hop(hops, hop_index):
@@ -103,9 +137,26 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     extra_query=self.server.proxy.extract_extra_query(qs),
                 )
             except ValueError as e:
+                # log
+                logger.exception(
+                    "http get build forward request failed : path=%s client_ip=%s hop_index=%s",
+                    parsed.path,
+                    client_ip,
+                    hop_index
+                )
+                #
                 self._send_text(500, f"route forward error: {e}")
                 return
-
+            # log
+            logger.debug(
+                "http get forwarding : path=%s client_ip=%s next_host=%s:%s hop_index=%s",
+                parsed.path,
+                client_ip,
+                next_host,
+                next_port,
+                hop_index
+            )
+            #
             if not silent:
                 print(f"PROXY: forward GET -> {next_host}:{next_port} {next_path}")
 
@@ -114,21 +165,61 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/hello":
             msg = (qs.get("msg") or [""])[0]
+            # log
+            logger.info(
+                "ping received : client_ip=%s msg_len=%s",
+                client_ip,
+                len(msg),
+            )
+            #
             print(f"SERVER: receive ping: {msg}")
             self._send_text(200, "Hello, Client")
             return
 
         if parsed.path == "/list_sessions":
+            # log
+            sessions = self.server.sessions.list_sessions()
+
+            logger.debug(
+                "sessions list requested : client_ip=%s count=%s",
+                client_ip,
+                len(sessions)
+            )
+            #
             self._send_json(200, {"sessions": self.server.sessions.list_sessions()})
             return
 
         if parsed.path == "/session_jobs":
             session_id = (qs.get("session_id") or [""])[0].strip()
             if not session_id:
+                # log
+                logger.warning(
+                    "session jobs bad request missing session_id : client_ip=%s",
+                    client_ip
+                )
+                #
                 self._send_text(400, "missing query parameter 'session_id'")
                 return
-
+            # log
+            logger.debug(
+                "session jobs requested : client_ip=%s session_id=%s",
+                client_ip,
+                session_id
+            )
+            #
             self._send_json(200, self.server.jobs.get_session_jobs(session_id))
+            return
+
+        if parsed.path == "/results_summary":
+            session_id = (qs.get("session_id") or [""])[0].strip() or None
+            # log
+            logger.debug(
+                "results summary requested : client_ip=%s session_id=%s",
+                client_ip,
+                session_id,
+            )
+            #
+            self._send_json(200, self.server.jobs.get_results_summary(session_id=session_id))
             return
 
         if parsed.path == "/pull_pending_results":
@@ -138,6 +229,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.server.sessions.touch_session(session_id)
 
             items = self.server.jobs.list_pending_responses(session_id=session_id)
+            # log
+            logger.debug(
+                "pending results pulled : client_ip=%s session_id=%s count=%s",
+                client_ip,
+                session_id,
+                len(items)
+            )
+            #
             self._send_json(200, {"responses": items})
             return
 
@@ -146,6 +245,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         silent = self._prepare_request_logging_state(parsed.path)
+        client_ip = self.client_address[0] if self.client_address else ""
 
         valid_paths = {
             "/open_shell",
@@ -155,18 +255,52 @@ class ProxyHandler(BaseHTTPRequestHandler):
         }
 
         if parsed.path not in valid_paths:
+            # log
+            logger.warning(
+                "HTTP POST not found : path=%s client_ip=%s",
+                parsed.path,
+                client_ip
+            )
+            #
             self._send_text(404, "not found")
             return
 
         try:
             qs, hops, hop_index = self.server.proxy.resolve_route(parsed)
         except ValueError as e:
+            # log
+            logger.warning(
+                "HTTP POST route resolve failed : path=%s client_ip=%s error=%s",
+                parsed.path,
+                client_ip,
+                e
+            )
+            #
             self._send_text(400, str(e))
             return
 
-        body = self._read_body()
+        try:
+            body = self._read_body()
+        except Exception:
+            # log
+            logger.exception(
+                "HTTP POST read body failed : path=%s client_ip=%s",
+                parsed.path,
+                client_ip
+            )
+            #
+            self._send_text(400, "failed to read request body")
+            return
+
 
         if not silent:
+            # log
+            logger.debug(
+                "HTTP POST received : path=%s client_ip=%s",
+                parsed.path,
+                client_ip,
+            )
+            #
             print(f"ROUTE: {format_route(hops)} | hop={hop_index}")
 
         if not is_final_hop(hops, hop_index):
@@ -178,8 +312,27 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     extra_query=self.server.proxy.extract_extra_query(qs),
                 )
             except ValueError as e:
+                # log
+                logger.exception(
+                    "HTTP POST build forward request failed : path=%s client_ip=%s hop_index=%s",
+                    parsed.path,
+                    client_ip,
+                    hop_index
+                )
+                #
                 self._send_text(500, f"route forward error: {e}")
                 return
+            
+            logger.debug(
+                "HTTP POST forwarding : path=%s client_ip=%s next_host=%s:%s "
+                "hop_index=%s body_size=%s",
+                parsed.path,
+                client_ip,
+                next_host,
+                next_port,
+                hop_index,
+                len(body)
+            )
 
             if not silent:
                 print(f"PROXY: forward POST -> {next_host}:{next_port} {next_path}")
@@ -190,15 +343,49 @@ class ProxyHandler(BaseHTTPRequestHandler):
         try:
             payload = self._load_json_payload(body)
         except ValueError as e:
+            # log
+            logger.warning(
+                "HTTP POST invalid json : path=%s client_ip=%s body_size=%s error=%s",
+                parsed.path,
+                client_ip,
+                len(body),
+                e,
+            )
+            #
             self._send_text(415 if "expected application/json" in str(e) else 400, str(e))
             return
 
         if parsed.path == "/open_shell":
             try:
+                # log
+                logger.info("open_shell requested : client_ip=%s", client_ip)
+                #
+
                 session_info = self.server.sessions.open_session()
                 self.server.workers.ensure_worker(str(session_info["session_id"]))
+
+                # log
+                logger.info(
+                    "open_shell done : client_ip=%s session_id=%s cwd=%s node_id=%s",
+                    client_ip,
+                    session_info.get("session_id"),
+                    session_info.get("cwd"),
+                    session_info.get("node_id")
+                )
+
+                audit_logger.info(
+                    "session opened : client_ip=%s session_id=%s node_id=%s",
+                    client_ip,
+                    session_info.get("session_id"),
+                    session_info.get("node_id")
+                )
+                #
+
                 self._send_json(200, session_info)
             except Exception as e:
+                # log
+                logger.exception("open_shell_failed client_ip=%s", client_ip)
+                #
                 self._send_text(500, f"open shell error: {e}")
             return
 
@@ -207,38 +394,130 @@ class ProxyHandler(BaseHTTPRequestHandler):
             command = str(payload.get("command", "")).strip()
 
             if not session_id:
+                # log
+                logger.warning(
+                    "send_command bad request[missing session_id] : client_ip=%s",
+                    client_ip
+                )
+                #
                 self._send_text(400, "missing 'session_id'")
                 return
 
             if not command:
+                # log
+                logger.warning(
+                    "send_command bad request [missing command] : client_ip=%s session_id=%s",
+                    client_ip,
+                    session_id
+                )
+                #
                 self._send_text(400, "missing 'command'")
                 return
 
             session = self.server.sessions.get_session(session_id)
             if not session:
+                # log
+                logger.warning(
+                    "send_command session not found : client_ip=%s session_id=%s command_len=%s",
+                    client_ip,
+                    session_id,
+                    len(command)
+                )
+                #
                 self._send_text(404, "session not found")
                 return
 
-            result = self.server.jobs.enqueue_command(
-                session_id=session_id,
-                command=command,
-                cwd=str(session.get("cwd", "")),
+            try:
+                result = self.server.jobs.enqueue_command(
+                    session_id=session_id,
+                    command=command,
+                    cwd=str(session.get("cwd", "")),
+                )
+            except Exception:
+                # log
+                logger.exception(
+                    "send_command enqueue failed : client_ip=%s session_id=%s command_len=%s",
+                    client_ip,
+                    session_id,
+                    len(command)
+                )
+                #
+                self._send_text(500, "failed to enqueue command")
+                return
+            
+            # log
+            logger.info(
+                "send_command queued : client_ip=%s session_id=%s job_id=%s command_len=%s cwd=%s",
+                client_ip,
+                session_id,
+                result.get("job_id"),
+                len(command),
+                result.get("cwd")
             )
+
+            audit_logger.info(
+                "command queued : client_ip=%s session_id=%s job_id=%s command_len=%s",
+                client_ip,
+                session_id,
+                result.get("job_id"),
+                len(command)
+            )
+            #
+
             self._send_json(202, result)
             return
 
         if parsed.path == "/close_shell":
             session_id = str(payload.get("session_id", "")).strip()
             if not session_id:
+                # log
+                logger.warning(
+                    "close_shell bad request [missing session_id] : client_ip=%s",
+                    client_ip
+                )
+                #
                 self._send_text(400, "missing 'session_id'")
                 return
 
             session = self.server.sessions.close_session(session_id)
             if session is None:
+                logger.warning(
+                    "close_shell session not found : client_ip=%s session_id=%s",
+                    client_ip,
+                    session_id
+                )
                 self._send_text(404, "session not found")
                 return
 
-            self.server.jobs.cancel_queued_for_session(session_id, "session closed")
+            try:
+                self.server.jobs.cancel_queued_for_session(session_id, "session closed")
+            except Exception:
+                # log
+                logger.exception(
+                    "close_shell cancel queued failed : client_ip=%s session_id=%s",
+                    client_ip,
+                    session_id
+                )
+                #
+                self._send_text(500, "shell closed, but failed to cancel queued jobs")
+                return
+            
+            # log
+            logger.info(
+                "close_shell done : client_ip=%s session_id=%s platform=%s cwd=%s",
+                client_ip,
+                session_id,
+                session.get("platform"),
+                session.get("cwd")
+            )
+
+            audit_logger.info(
+                "session closed : client_ip=%s session_id=%s",
+                client_ip,
+                session_id
+            )
+            #
+
             self._send_text(200, "shell closed")
             return
 
@@ -251,17 +530,39 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 single = str(payload.get("response_id", "")).strip()
                 ids = [single] if single else []
 
-            removed = self.server.jobs.ack_responses(ids)
+            try:
+                removed = self.server.jobs.ack_responses(ids)
+            except Exception:
+                # log
+                logger.exception(
+                    "ack_response failed : client_ip=%s ids_count=%s",
+                    client_ip,
+                    len(ids)
+                )
+                #
+                self._send_text(500, "failed to ack response")
+                return
+            # log
+            logger.debug(
+                "ack_response done : client_ip=%s ids_count=%s acknowledged=%s",
+                client_ip,
+                len(ids),
+                removed
+            )
+            #
+
             self._send_json(200, {"acknowledged": removed})
             return
 
         self._send_text(404, "not found")
+
 
     def log_request(self, code="-", size="-"):
         if getattr(self, "_suppress_access_log", False):
             return
 
         super().log_request(code, size)
+
 
     def log_message(self, fmt, *args):
         path = getattr(self, "_request_path", "") or urlparse(self.path).path

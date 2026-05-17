@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+import os
+import sys
+import threading
+
+
+class TerminalUI:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._input_active = False
+        self._prompt = ""
+        self._buffer = ""
+        self._last_render_len = 0
+
+    def print_line(self, *args, sep: str = " ", end: str = "\n") -> None:
+        text = sep.join(str(arg) for arg in args) + end
+        self.write(text)
+
+    def write(self, text: str) -> None:
+        with self._lock:
+            if self._input_active:
+                self._clear_line_locked()
+                sys.stdout.write(text)
+
+                if text and not text.endswith("\n"):
+                    sys.stdout.write("\n")
+
+                self._render_input_locked()
+            else:
+                sys.stdout.write(text)
+
+            sys.stdout.flush()
+
+    def input(self, prompt: str) -> str:
+        if not sys.stdin.isatty():
+            return input(prompt)
+
+        with self._lock:
+            self._input_active = True
+            self._prompt = prompt
+            self._buffer = ""
+            self._last_render_len = 0
+            self._render_input_locked()
+
+        try:
+            if os.name == "nt":
+                return self._input_windows()
+
+            return self._input_posix()
+        finally:
+            with self._lock:
+                self._input_active = False
+                self._prompt = ""
+                self._buffer = ""
+                self._last_render_len = 0
+
+    def _clear_line_locked(self) -> None:
+        visible_len = max(
+            self._last_render_len,
+            len(self._prompt) + len(self._buffer),
+        )
+        sys.stdout.write("\r" + (" " * (visible_len + 8)) + "\r")
+
+    def _render_input_locked(self) -> None:
+        self._clear_line_locked()
+        line = self._prompt + self._buffer
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        self._last_render_len = len(line)
+
+    def _append_char(self, ch: str) -> None:
+        with self._lock:
+            self._buffer += ch
+            self._render_input_locked()
+
+    def _backspace(self) -> None:
+        with self._lock:
+            if self._buffer:
+                self._buffer = self._buffer[:-1]
+                self._render_input_locked()
+
+    def _finish_input(self) -> str:
+        with self._lock:
+            value = self._buffer
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return value
+
+    def _cancel_input(self) -> None:
+        with self._lock:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        raise KeyboardInterrupt
+
+    def _input_windows(self) -> str:
+        import msvcrt
+
+        while True:
+            ch = msvcrt.getwch()
+
+            if ch in {"\x00", "\xe0"}:
+                try:
+                    msvcrt.getwch()
+                except Exception:
+                    pass
+                continue
+
+            if ch == "\x03":
+                self._cancel_input()
+
+            if ch in {"\r", "\n"}:
+                return self._finish_input()
+
+            if ch in {"\b", "\x7f"}:
+                self._backspace()
+                continue
+
+            if ch and ch.isprintable():
+                self._append_char(ch)
+
+    def _input_posix(self) -> str:
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+
+        try:
+            tty.setraw(fd)
+
+            while True:
+                ch = sys.stdin.read(1)
+
+                if ch == "\x03":
+                    self._cancel_input()
+
+                if ch == "\x04":
+                    raise EOFError
+
+                if ch in {"\r", "\n"}:
+                    return self._finish_input()
+
+                if ch in {"\b", "\x7f"}:
+                    self._backspace()
+                    continue
+
+                if ch == "\x1b":
+                    # Ignore escape sequences, for example arrow keys.
+                    continue
+
+                if ch and ch.isprintable():
+                    self._append_char(ch)
+
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+_TERMINAL = TerminalUI()
+
+
+def ui_print(*args, sep: str = " ", end: str = "\n") -> None:
+    _TERMINAL.print_line(*args, sep=sep, end=end)
+
+
+def ui_input(prompt: str) -> str:
+    return _TERMINAL.input(prompt)
