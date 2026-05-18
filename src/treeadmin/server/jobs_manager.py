@@ -36,7 +36,7 @@ class JobsManager:
         error = item.get("error")
         returncode = item.get("returncode")
 
-        if status in {"failed", "canceled", "orphaned"}:
+        if status in {"failed", "canceled", "orphaned", "interrupted", "lost", "expired"}:
             return True
 
         if error:
@@ -68,7 +68,7 @@ class JobsManager:
 
         return len(str(value).encode("utf-8", errors="replace"))
 
-    def _build_response_locked(self, state: dict, job: dict) -> dict:
+    def _build_response_locked(self, state: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         response_id = str(state["next_response_id"])
         state["next_response_id"] += 1
         now_ts = time.time()
@@ -87,6 +87,29 @@ class JobsManager:
             "created_at": self._utc_now(),
             "ready_at": str(job.get("finished_at", self._utc_now())),
             "expires_at_ts": now_ts + self.response_ttl_seconds,
+            "output_size": int(job.get("output_size", self._output_size(job.get("output", ""))) or 0),
+            "output_truncated": bool(job.get("output_truncated", False)),
+            "original_output_size": int(job.get("original_output_size", 0) or 0),
+        }
+
+    def _build_history_entry(self, job: dict[str, Any]) -> dict[str, Any]:
+        # Full output is stored only in pending responses.
+        # History keeps only a short metadata record.
+        return {
+            "job_id": str(job.get("job_id", "")),
+            "session_id": str(job.get("session_id", "")),
+            "node_id": str(job.get("node_id", self.node_id)),
+            "command": str(job.get("command", "")),
+            "status": str(job.get("status", "")),
+            "created_at": job.get("created_at"),
+            "started_at": job.get("started_at"),
+            "finished_at": job.get("finished_at"),
+            "cwd": str(job.get("cwd", "")),
+            "returncode": job.get("returncode"),
+            "error": job.get("error"),
+            "output_size": int(job.get("output_size", 0) or 0),
+            "output_truncated": bool(job.get("output_truncated", False)),
+            "original_output_size": int(job.get("original_output_size", 0) or 0),
         }
 
     def _response_summary(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -101,7 +124,8 @@ class JobsManager:
             "ready_at": item.get("ready_at") or item.get("created_at"),
             "created_at": item.get("created_at"),
             "cwd": str(item.get("cwd", "")),
-            "output_size": self._output_size(item.get("output", "")),
+            "output_size": int(item.get("output_size", self._output_size(item.get("output", ""))) or 0),
+            "output_truncated": bool(item.get("output_truncated", False)),
             "has_error": self._is_failed_response(item),
             "error": self._short_error(item.get("error")),
         }
@@ -118,9 +142,25 @@ class JobsManager:
             "cwd": str(item.get("cwd", "")),
         }
 
-    def enqueue_command(self, session_id: str, command: str, cwd: str) -> dict:
+    def enqueue_command(self, session_id: str, command: str, cwd: str) -> dict[str, Any]:
         with self.store.lock:
             state = self.store.load_state()
+            self.store.purge_expired_responses_locked(state)
+
+            queue_count = len(state["queue"]) # for log
+            if self.store.max_queue_items > 0 and queue_count >= self.store.max_queue_items:
+                # log
+                logger.warning(
+                    "job queue limit exceeded : session_id=%s queue_count=%s max_queue_items=%s command=[%s]",
+                    session_id,
+                    queue_count,
+                    self.store.max_queue_items,
+                    command,
+                )
+                #
+                raise RuntimeError(
+                    f"server job queue limit exceeded: {queue_count}/{self.store.max_queue_items}"
+                )
 
             job_id = str(state["next_job_id"])
             state["next_job_id"] += 1
@@ -138,11 +178,24 @@ class JobsManager:
                 "cwd": cwd,
                 "returncode": None,
                 "error": None,
+                "output_size": 0,
+                "output_truncated": False,
+                "original_output_size": 0,
             }
 
             state["queue"].append(job)
-            self.store.purge_expired_responses_locked(state)
-            self.store.save_state(state)
+            stats = state.setdefault("stats", {})
+            stats["total_jobs_created"] = int(stats.get("total_jobs_created", 0) or 0) + 1
+
+            self.store.save_state(
+                state,
+                journal_op="enqueue",
+                journal_payload={
+                    "job_id": job_id,
+                    "session_id": session_id,
+                    "node_id": self.node_id,
+                },
+            )
 
         # log
         logger.info(
@@ -168,12 +221,12 @@ class JobsManager:
             "node_id": self.node_id,
         }
 
-    def claim_next_job(self, session_id: str) -> dict | None:
+    def claim_next_job(self, session_id: str) -> dict[str, Any] | None:
         with self.store.lock:
             state = self.store.load_state()
-            self.store.purge_expired_responses_locked(state)
+            changed = self.store.purge_expired_responses_locked(state)
 
-            claimed_job: dict | None = None
+            claimed_job: dict[str, Any] | None = None
 
             for item in state["queue"]:
                 if str(item.get("session_id", "")) != session_id:
@@ -187,7 +240,16 @@ class JobsManager:
                 break
 
             if claimed_job is not None:
-                self.store.save_state(state)
+                self.store.save_state(
+                    state,
+                    journal_op="claim",
+                    journal_payload={
+                        "job_id": str(claimed_job.get("job_id", "")),
+                        "session_id": session_id,
+                    },
+                )
+            elif changed:
+                self.store.save_state(state, journal_op="cleanup_expired_responses")
         
         # log
         if claimed_job is not None:
@@ -209,13 +271,17 @@ class JobsManager:
         cwd: str,
         returncode: int | None,
         error: str | None,
-    ) -> dict | None:
-        response_entry: dict | None = None
+    ) -> dict[str, Any] | None:
+        response_entry: dict[str, Any] | None = None
+        final_job: dict[str, Any] | None = None
+
+        output_for_response, original_output_size, output_truncated = self.store.truncate_output(output)
+        response_output_size = self._output_size(output_for_response)
 
         with self.store.lock:
             state = self.store.load_state()
 
-            queue_item: dict | None = None
+            queue_item: dict[str, Any] | None = None
             for item in state["queue"]:
                 if str(item.get("job_id", "")) == str(job_id):
                     queue_item = item
@@ -234,10 +300,13 @@ class JobsManager:
 
             queue_item["status"] = status
             queue_item["finished_at"] = self._utc_now()
-            queue_item["output"] = output
+            queue_item["output"] = output_for_response
             queue_item["cwd"] = cwd
             queue_item["returncode"] = returncode
             queue_item["error"] = error
+            queue_item["output_size"] = response_output_size
+            queue_item["output_truncated"] = output_truncated
+            queue_item["original_output_size"] = original_output_size
 
             final_job = dict(queue_item)
 
@@ -246,17 +315,35 @@ class JobsManager:
                 for item in state["queue"]
                 if str(item.get("job_id", "")) != str(job_id)
             ]
-            state["history"].append(final_job)
+            state["history"].append(self._build_history_entry(final_job))
 
             response_entry = self._build_response_locked(state, final_job)
             state["responses"].append(response_entry)
 
+            stats = state.setdefault("stats", {})
+            stats["total_jobs_finished"] = int(stats.get("total_jobs_finished", 0) or 0) + 1
+            if status in {"failed", "canceled", "orphaned", "interrupted", "lost"} or error:
+                stats["total_jobs_failed"] = int(stats.get("total_jobs_failed", 0) or 0) + 1
+
             self.store.purge_expired_responses_locked(state)
-            self.store.save_state(state)
+            self.store.save_state(
+                state,
+                journal_op="finish",
+                journal_payload={
+                    "job_id": job_id,
+                    "response_id": str(response_entry.get("response_id", "")),
+                    "session_id": str(final_job.get("session_id", "")),
+                    "status": status,
+                    "returncode": returncode,
+                    "output_size": response_output_size,
+                    "output_truncated": output_truncated,
+                },
+            )
 
         # for log
         response_id = str(response_entry.get("response_id", "")) if response_entry else ""
-        session_id = str(final_job.get("session_id", ""))
+        session_id = str(final_job.get("session_id", "")) if final_job else ""
+        command = str(final_job.get("command", "")) if final_job else ""
         #
 
         # log
@@ -268,32 +355,33 @@ class JobsManager:
             job_id,
             response_id,
             session_id,
-            str(item.get("command", "")),
+            command,
             status
         )
 
-        if status in {"failed", "canceled", "orphaned"} or error:
+        if status in {"failed", "canceled", "orphaned", "interrupted", "lost"} or error:
             logger.warning(log_message, *log_args)
         else:
             logger.info(log_message, *log_args)
 
         audit_logger.info(
             "job finished : job_id=%s response_id=%s session_id=%s node_id=%s "
-            "command=[%s] status=%s returncode=%s output_size=%s",
+            "command=[%s] status=%s returncode=%s output_size=%s output_truncated=%s",
             job_id,
             response_id,
             session_id,
             self.node_id,
-            str(item.get("command", "")),
+            command,
             status,
             returncode,
-            self._output_size(output),
+            response_output_size,
+            output_truncated,
         )
         #
 
         return response_entry
 
-    def get_session_jobs(self, session_id: str) -> dict:
+    def get_session_jobs(self, session_id: str) -> dict[str, Any]:
         with self.store.lock:
             state = self.store.load_state()
             changed = self.store.purge_expired_responses_locked(state)
@@ -315,7 +403,7 @@ class JobsManager:
             ]
 
             if changed:
-                self.store.save_state(state)
+                self.store.save_state(state, journal_op="cleanup_expired_responses")
 
         # log
         logger.debug(
@@ -336,7 +424,7 @@ class JobsManager:
             "responses": response_items,
         }
 
-    def get_results_summary(self, session_id: str | None = None) -> dict:
+    def get_results_summary(self, session_id: str | None = None) -> dict[str, Any]:
         with self.store.lock:
             state = self.store.load_state()
             changed = self.store.purge_expired_responses_locked(state)
@@ -354,7 +442,7 @@ class JobsManager:
                 response_items.append(dict(item))
 
             if changed:
-                self.store.save_state(state)
+                self.store.save_state(state, journal_op="cleanup_expired_responses")
 
         queued = [
             self._queue_summary(item)
@@ -408,7 +496,7 @@ class JobsManager:
 
         with self.store.lock:
             state = self.store.load_state()
-            new_queue: list[dict] = []
+            new_queue: list[dict[str, Any]] = []
 
             for job in state["queue"]:
                 if (
@@ -424,7 +512,11 @@ class JobsManager:
                 job["cwd"] = str(job.get("cwd", ""))
                 job["returncode"] = None
                 job["error"] = reason
-                state["history"].append(job)
+                job["output_size"] = 0
+                job["output_truncated"] = False
+                job["original_output_size"] = 0
+
+                state["history"].append(self._build_history_entry(job))
                 state["responses"].append(self._build_response_locked(state, job))
                 changed = True
                 canceled_count += 1 # for log
@@ -432,7 +524,15 @@ class JobsManager:
             if changed:
                 state["queue"] = new_queue
                 self.store.purge_expired_responses_locked(state)
-                self.store.save_state(state)
+                self.store.save_state(
+                    state,
+                    journal_op="cancel_queued_for_session",
+                    journal_payload={
+                        "session_id": session_id,
+                        "reason": reason,
+                        "count": canceled_count,
+                    },
+                )
             # log
             queue_count = len(state["queue"])
             history_count = len(state["history"])
@@ -465,61 +565,111 @@ class JobsManager:
             )
         #
 
-    def mark_startup_orphans(self) -> None:
+    def recover_after_startup(self) -> None:
         with self.store.lock:
             state = self.store.load_state()
+            now = self._utc_now()
+            recovered_running = 0 # for log
+            kept_queued = 0 # for log
+            new_queue: list[dict[str, Any]] = []
 
-            if not state["queue"]:
-                changed = self.store.purge_expired_responses_locked(state)
-                if changed:
-                    self.store.save_state(state)
-                # log
-                logger.debug(
-                    "startup orphans check no pending jobs : node_id=%s purged_expired_responses=%s",
-                    self.node_id,
-                    changed,
-                )
-                #
-                return
+            for job in state["queue"]:
+                status = str(job.get("status", ""))
 
-            pending = list(state["queue"])
-            state["queue"] = []
+                if status == "queued":
+                    kept_queued += 1 # for log
+                    new_queue.append(job)
+                    continue
 
-            for job in pending:
-                job["status"] = "orphaned"
-                job["started_at"] = job.get("started_at") or self._utc_now()
-                job["finished_at"] = self._utc_now()
+                if status == "running":
+                    job["status"] = "interrupted"
+                    job["finished_at"] = now
+                    job["output"] = ""
+                    job["cwd"] = str(job.get("cwd", ""))
+                    job["returncode"] = None
+                    job["error"] = "server restarted while command was running"
+                    job["output_size"] = 0
+                    job["output_truncated"] = False
+                    job["original_output_size"] = 0
+                    state["history"].append(self._build_history_entry(job))
+                    state["responses"].append(self._build_response_locked(state, job))
+                    recovered_running += 1 # for log
+                    continue
+
+                job["status"] = "interrupted"
+                job["finished_at"] = now
                 job["output"] = ""
                 job["cwd"] = str(job.get("cwd", ""))
                 job["returncode"] = None
-                job["error"] = "server restarted before queued command could finish"
-                state["history"].append(job)
+                job["error"] = f"server restarted with unsupported queued status: {status}"
+                job["output_size"] = 0
+                job["output_truncated"] = False
+                job["original_output_size"] = 0
+                state["history"].append(self._build_history_entry(job))
                 state["responses"].append(self._build_response_locked(state, job))
+                recovered_running += 1 # for log
 
-            self.store.purge_expired_responses_locked(state)
-            self.store.save_state(state)
+            state["queue"] = new_queue
+            state.setdefault("stats", {})["last_recovery_at"] = now
+            if recovered_running:
+                stats = state.setdefault("stats", {})
+                stats["total_jobs_failed"] = int(stats.get("total_jobs_failed", 0) or 0) + recovered_running
+
+            changed = self.store.purge_expired_responses_locked(state)
+            changed = self.store.compact_state_locked(state) or changed or recovered_running > 0
+            changed = True # last_recovery_at was updated
+
+            if changed:
+                self.store.save_state(
+                    state,
+                    journal_op="startup_recovery",
+                    journal_payload={
+                        "kept_queued": kept_queued,
+                        "interrupted": recovered_running,
+                    },
+                )
 
             # for log
             history_count = len(state["history"])
             responses_count = len(state["responses"])
+            queue_count = len(state["queue"])
             #
-        # log
-        logger.warning(
-            "startup orphan jobs marked : node_id=%s count=%s history_count=%s responses_count=%s",
-            self.node_id,
-            len(pending),
-            history_count,
-            responses_count,
-        )
 
-        audit_logger.info(
-            "startup orphan jobs marked : node_id=%s count=%s",
-            self.node_id,
-            len(pending),
-        )
+        # log
+        if recovered_running:
+            logger.warning(
+                "startup recovery interrupted running jobs : node_id=%s count=%s kept_queued=%s "
+                "queue_count=%s history_count=%s responses_count=%s",
+                self.node_id,
+                recovered_running,
+                kept_queued,
+                queue_count,
+                history_count,
+                responses_count,
+            )
+
+            audit_logger.info(
+                "startup recovery interrupted running jobs : node_id=%s count=%s kept_queued=%s",
+                self.node_id,
+                recovered_running,
+                kept_queued,
+            )
+        else:
+            logger.info(
+                "startup recovery done : node_id=%s kept_queued=%s queue_count=%s",
+                self.node_id,
+                kept_queued,
+                queue_count,
+            )
         #
 
-    def list_pending_responses(self, session_id: str | None = None) -> list[dict]:
+    def mark_startup_orphans(self) -> None:
+        # Backward-compatible method name.
+        # New behavior is safer for real use: queued jobs stay queued,
+        # running jobs are reported as interrupted.
+        self.recover_after_startup()
+
+    def list_pending_responses(self, session_id: str | None = None) -> list[dict[str, Any]]:
         with self.store.lock:
             state = self.store.load_state()
             changed = self.store.purge_expired_responses_locked(state)
@@ -531,7 +681,7 @@ class JobsManager:
                 result.append(dict(item))
 
             if changed:
-                self.store.save_state(state)
+                self.store.save_state(state, journal_op="cleanup_expired_responses")
         
         # log
         logger.debug(
@@ -565,7 +715,15 @@ class JobsManager:
 
             state["responses"] = new_responses
             self.store.purge_expired_responses_locked(state)
-            self.store.save_state(state)
+            self.store.save_state(
+                state,
+                journal_op="ack",
+                journal_payload={
+                    "requested_count": len(ids),
+                    "removed_count": removed,
+                    "response_ids": sorted(ids),
+                },
+            )
             responses_count = len(state["responses"]) # for log
 
         # log
