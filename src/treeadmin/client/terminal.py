@@ -13,6 +13,13 @@ class TerminalUI:
         self._buffer = ""
         self._last_render_len = 0
 
+    @staticmethod
+    def _normalize_terminal_newlines(text: str) -> str:
+        return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+
+    def _write_terminal_locked(self, text: str) -> None:
+        sys.stdout.write(self._normalize_terminal_newlines(text))
+
     def print_line(self, *args, sep: str = " ", end: str = "\n") -> None:
         text = sep.join(str(arg) for arg in args) + end
         self.write(text)
@@ -21,10 +28,10 @@ class TerminalUI:
         with self._lock:
             if self._input_active:
                 self._clear_line_locked()
-                sys.stdout.write(text)
+                self._write_terminal_locked(text)
 
-                if text and not text.endswith("\n"):
-                    sys.stdout.write("\n")
+                if text and not text.endswith(("\n", "\r")):
+                    self._write_terminal_locked("\n")
 
                 self._render_input_locked()
             else:
@@ -80,13 +87,13 @@ class TerminalUI:
     def _finish_input(self) -> str:
         with self._lock:
             value = self._buffer
-            sys.stdout.write("\n")
+            self._write_terminal_locked("\n")
             sys.stdout.flush()
             return value
 
     def _cancel_input(self) -> None:
         with self._lock:
-            sys.stdout.write("\n")
+            self._write_terminal_locked("\n")
             sys.stdout.flush()
 
         raise KeyboardInterrupt
