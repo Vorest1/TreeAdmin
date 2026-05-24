@@ -49,10 +49,7 @@ def format_response_payload(payload: dict[str, Any]) -> str:
     session_id = str(payload.get("session_id", ""))
     job_id = str(payload.get("job_id", ""))
     command = str(payload.get("command", ""))
-    status = str(payload.get("status", ""))
     output = _decode_output_for_display(payload)
-    cwd = str(payload.get("cwd", ""))
-    returncode = payload.get("returncode")
     error = payload.get("error")
 
     lines: list[str] = [
@@ -60,17 +57,8 @@ def format_response_payload(payload: dict[str, Any]) -> str:
         f"[from {node_id}][session {session_id}][job {job_id}] {command}",
     ]
 
-    if status:
-        lines.append(f"[status={status}]")
-
     if output:
         lines.append(output)
-
-    if cwd:
-        lines.append(f"[cwd={cwd}]")
-
-    if isinstance(returncode, int):
-        lines.append(f"[returncode={returncode}]")
 
     if error:
         lines.append(f"[error={error}]")
