@@ -48,13 +48,14 @@ def format_response_payload(payload: dict[str, Any]) -> str:
     output = str(payload.get("output", "")).strip()
     error = payload.get("error")
 
+    lines: list[str] = [ "", "\n"]
     if output:
-        return "\n" + output
+        lines.append(output)
 
     if error:
-        return "\n" + str(error).strip()
+        lines.append(error)
 
-    return ""
+    return lines
 
 
 def print_response_payload(payload: dict[str, Any]) -> None:
