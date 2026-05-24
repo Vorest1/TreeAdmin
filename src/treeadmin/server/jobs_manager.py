@@ -90,11 +90,18 @@ class JobsManager:
             "output_size": int(job.get("output_size", self._output_size(job.get("output", ""))) or 0),
             "output_truncated": bool(job.get("output_truncated", False)),
             "original_output_size": int(job.get("original_output_size", 0) or 0),
+            "output_storage_format": str(job.get("output_storage_format", "base64") or "base64"),
+            "output_encoding": str(job.get("output_encoding", "base64") or "base64"),
+            "stored_output_size": int(
+                job.get(
+                    "stored_output_size",
+                    self._output_size(job.get("output", "")),
+                )
+                or 0
+            ),
         }
 
     def _build_history_entry(self, job: dict[str, Any]) -> dict[str, Any]:
-        # Full output is stored only in pending responses.
-        # History keeps only a short metadata record.
         return {
             "job_id": str(job.get("job_id", "")),
             "session_id": str(job.get("session_id", "")),
@@ -110,6 +117,9 @@ class JobsManager:
             "output_size": int(job.get("output_size", 0) or 0),
             "output_truncated": bool(job.get("output_truncated", False)),
             "original_output_size": int(job.get("original_output_size", 0) or 0),
+            "output_storage_format": str(job.get("output_storage_format", "base64") or "base64"),
+            "output_encoding": str(job.get("output_encoding", "base64") or "base64"),
+            "stored_output_size": int(job.get("stored_output_size", 0) or 0),
         }
 
     def _response_summary(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -128,6 +138,15 @@ class JobsManager:
             "output_truncated": bool(item.get("output_truncated", False)),
             "has_error": self._is_failed_response(item),
             "error": self._short_error(item.get("error")),
+            "output_storage_format": str(item.get("output_storage_format", "base64") or "base64"),
+            "output_encoding": str(item.get("output_encoding", "base64") or "base64"),
+            "stored_output_size": int(
+                item.get(
+                    "stored_output_size",
+                    self._output_size(item.get("output", "")),
+                )
+                or 0
+            ),
         }
 
     def _queue_summary(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -142,7 +161,13 @@ class JobsManager:
             "cwd": str(item.get("cwd", "")),
         }
 
-    def enqueue_command(self, session_id: str, command: str, cwd: str) -> dict[str, Any]:
+    def enqueue_command(
+        self,
+        session_id: str,
+        command: str,
+        cwd: str,
+        output_storage_format: str = "base64",
+    ) -> dict[str, Any]:
         with self.store.lock:
             state = self.store.load_state()
             self.store.purge_expired_responses_locked(state)
@@ -181,6 +206,12 @@ class JobsManager:
                 "output_size": 0,
                 "output_truncated": False,
                 "original_output_size": 0,
+                "output_storage_format": self.store.normalize_output_storage_format(
+                    output_storage_format,
+                    default="base64",
+                ),
+                "output_encoding": "",
+                "stored_output_size": 0,
             }
 
             state["queue"].append(job)
@@ -219,6 +250,7 @@ class JobsManager:
             "status": "queued",
             "cwd": cwd,
             "node_id": self.node_id,
+            "output_storage_format": job["output_storage_format"],
         }
 
     def claim_next_job(self, session_id: str) -> dict[str, Any] | None:
@@ -275,8 +307,17 @@ class JobsManager:
         response_entry: dict[str, Any] | None = None
         final_job: dict[str, Any] | None = None
 
-        output_for_response, original_output_size, output_truncated = self.store.truncate_output(output)
-        response_output_size = self._output_size(output_for_response)
+        prepared_output = self.store.prepare_output_for_storage(
+            output,
+            output_storage_format="base64",
+        )
+
+        output_for_response = str(prepared_output["output"])
+        output_encoding = str(prepared_output["output_encoding"])
+        response_output_size = int(prepared_output["output_size"])
+        stored_output_size = int(prepared_output["stored_output_size"])
+        output_truncated = bool(prepared_output["output_truncated"])
+        original_output_size = int(prepared_output["original_output_size"])
 
         with self.store.lock:
             state = self.store.load_state()
@@ -298,13 +339,33 @@ class JobsManager:
                 #
                 return None
 
+            output_storage_format = self.store.normalize_output_storage_format(
+                queue_item.get("output_storage_format", "base64"),
+                default="base64",
+            )
+
+            prepared_output = self.store.prepare_output_for_storage(
+                output,
+                output_storage_format=output_storage_format,
+            )
+
+            output_for_response = str(prepared_output["output"])
+            output_encoding = str(prepared_output["output_encoding"])
+            response_output_size = int(prepared_output["output_size"])
+            stored_output_size = int(prepared_output["stored_output_size"])
+            output_truncated = bool(prepared_output["output_truncated"])
+            original_output_size = int(prepared_output["original_output_size"])
+
             queue_item["status"] = status
             queue_item["finished_at"] = self._utc_now()
             queue_item["output"] = output_for_response
+            queue_item["output_storage_format"] = output_storage_format
+            queue_item["output_encoding"] = output_encoding
             queue_item["cwd"] = cwd
             queue_item["returncode"] = returncode
             queue_item["error"] = error
             queue_item["output_size"] = response_output_size
+            queue_item["stored_output_size"] = stored_output_size
             queue_item["output_truncated"] = output_truncated
             queue_item["original_output_size"] = original_output_size
 
@@ -515,6 +576,9 @@ class JobsManager:
                 job["output_size"] = 0
                 job["output_truncated"] = False
                 job["original_output_size"] = 0
+                job["output_storage_format"] = str(job.get("output_storage_format", "base64") or "base64")
+                job["output_encoding"] = job["output_storage_format"]
+                job["stored_output_size"] = 0
 
                 state["history"].append(self._build_history_entry(job))
                 state["responses"].append(self._build_response_locked(state, job))
@@ -605,6 +669,9 @@ class JobsManager:
                 job["output_size"] = 0
                 job["output_truncated"] = False
                 job["original_output_size"] = 0
+                job["output_storage_format"] = str(job.get("output_storage_format", "base64") or "base64")
+                job["output_encoding"] = job["output_storage_format"]
+                job["stored_output_size"] = 0
                 state["history"].append(self._build_history_entry(job))
                 state["responses"].append(self._build_response_locked(state, job))
                 recovered_running += 1 # for log
@@ -664,9 +731,6 @@ class JobsManager:
         #
 
     def mark_startup_orphans(self) -> None:
-        # Backward-compatible method name.
-        # New behavior is safer for real use: queued jobs stay queued,
-        # running jobs are reported as interrupted.
         self.recover_after_startup()
 
     def list_pending_responses(self, session_id: str | None = None) -> list[dict[str, Any]]:

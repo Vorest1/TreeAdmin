@@ -232,6 +232,9 @@ def send_queued_command(
     session_id: str,
     command: str,
 ) -> tuple[int, dict[str, Any]]:
+    client_config = load_client_config()
+    output_storage_format = client_config.preferred_storage_output_format
+
     status, raw = request(
         "POST",
         target_id,
@@ -239,6 +242,7 @@ def send_queued_command(
         payload={
             "session_id": session_id,
             "command": command,
+            "output_storage_format": output_storage_format,
         },
     )
 

@@ -393,6 +393,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             session_id = str(payload.get("session_id", "")).strip()
             command = str(payload.get("command", "")).strip()
 
+            output_storage_format = str(
+                payload.get("output_storage_format", "base64")
+            ).strip().lower()
+
+            if output_storage_format not in {"text", "base64"}:
+                output_storage_format = "base64"
+
             if not session_id:
                 # log
                 logger.warning(
@@ -432,6 +439,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     session_id=session_id,
                     command=command,
                     cwd=str(session.get("cwd", "")),
+                    output_storage_format=output_storage_format,
                 )
             except Exception:
                 # log

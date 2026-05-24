@@ -49,6 +49,18 @@ class ClientConfig:
             encoding="utf-8",
         )
 
+    @staticmethod
+    def _normalize_output_format(value: Any, default: str = "base64") -> str:
+        normalized = str(value or default).strip().lower()
+
+        if normalized in {"base64", "b64"}:
+            return "base64"
+
+        if normalized in {"text", "plain", "human", "readable"}:
+            return "text"
+
+        return default
+
     @classmethod
     def load(cls, path: str | Path | None = None) -> ClientConfig:
         final_path = Path(path) if path is not None else cls.DEFAULT_PATH
@@ -93,17 +105,22 @@ class ClientConfig:
     @classmethod
     def build_basic(cls) -> ClientConfig:
         return cls.build(
-            root_id="pc1",
-            timeout=10,
-            nodes={
-                "pc1": {
-                    "children": ["pc2"],
+            {
+                "timeout": 10,
+                "root_id": "pc1",
+                "nodes": {
+                    "pc1": {
+                        "children": ["pc2"],
+                    },
+                    "pc2": {
+                        "host": "127.0.0.1",
+                        "port": 8000,
+                    },
                 },
-                "pc2": {
-                    "host": "127.0.0.1",
-                    "port": 8000,
+                "storage": {
+                    "output_format": "base64",
                 },
-            },
+            }
         )
 
     def validate(self) -> None:
@@ -162,6 +179,17 @@ class ClientConfig:
                     raise ValueError(
                         f"Node '{node_id}' references unknown child '{child_id}'"
                     )
+        
+        storage = self.data.get("storage")
+        if storage is not None:
+            if not isinstance(storage, dict):
+                raise ValueError("storage must be object")
+
+            output_format = self._normalize_output_format(
+                storage.get("output_format"),
+                default="base64",
+            )
+            storage["output_format"] = output_format
 
     @property
     def timeout(self) -> int:
@@ -174,3 +202,15 @@ class ClientConfig:
     @property
     def nodes(self) -> dict[str, dict[str, Any]]:
         return self.data["nodes"]
+
+    @property
+    def preferred_storage_output_format(self) -> str:
+        storage = self.data.get("storage", {})
+
+        if not isinstance(storage, dict):
+            return "base64"
+
+        return self._normalize_output_format(
+            storage.get("output_format"),
+            default="base64",
+        )

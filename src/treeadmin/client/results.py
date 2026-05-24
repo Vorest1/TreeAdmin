@@ -6,6 +6,8 @@ from src.treeadmin.client import api
 from src.treeadmin.client import state
 from src.treeadmin.client.terminal import ui_print
 
+import base64
+import binascii
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,13 +27,30 @@ def _short_text(value: Any, limit: int = 180) -> str:
 
     return text[: limit - 3] + "..."
 
+def _decode_output_for_display(payload: dict[str, Any]) -> str:
+    output = str(payload.get("output", ""))
+    encoding = str(payload.get("output_encoding", "text") or "text").strip().lower()
+
+    if encoding != "base64":
+        return output
+
+    try:
+        raw = base64.b64decode(output.encode("ascii"), validate=True)
+    except (binascii.Error, UnicodeEncodeError):
+        return (
+            "[TreeAdmin: failed to decode base64 output; raw stored value follows]\n"
+            + output
+        )
+
+    return raw.decode("utf-8", errors="replace")
+
 def format_response_payload(payload: dict[str, Any]) -> str:
     node_id = str(payload.get("node_id", "unknown-node"))
     session_id = str(payload.get("session_id", ""))
     job_id = str(payload.get("job_id", ""))
     command = str(payload.get("command", ""))
     status = str(payload.get("status", ""))
-    output = str(payload.get("output", ""))
+    output = _decode_output_for_display(payload)
     cwd = str(payload.get("cwd", ""))
     returncode = payload.get("returncode")
     error = payload.get("error")
@@ -167,7 +186,7 @@ def pull_pending_results(
                 response_session_id,
                 response_status,
                 returncode,
-                _output_size(item.get("output", ""))
+                _output_size(_decode_output_for_display(item))
             )
             #
             

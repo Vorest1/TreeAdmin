@@ -324,6 +324,9 @@ client -> proxy -> server
       "host": "10.0.0.20",
       "port": 8000
     }
+  },
+  "storage": {
+    "output_format": "base64"
   }
 }
 ```

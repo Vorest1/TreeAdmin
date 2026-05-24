@@ -18,5 +18,8 @@
       "host": "72.56.4.93",
       "port": 8000
     }
+  },
+  "storage": {
+    "output_format": "base64"
   }
 }

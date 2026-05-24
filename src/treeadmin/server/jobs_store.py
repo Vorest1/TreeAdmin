@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -100,6 +101,55 @@ class JobsStore:
     @staticmethod
     def _utc_now() -> str:
         return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+    @staticmethod
+    def normalize_output_storage_format(value: Any, default: str = "base64") -> str:
+        normalized = str(value or default).strip().lower()
+
+        if normalized in {"base64", "b64"}:
+            return "base64"
+
+        if normalized in {"text", "plain", "human", "readable"}:
+            return "text"
+
+        logger.warning(
+            "Jobs Store invalid output storage format ignored : value=%s default=%s",
+            value,
+            default,
+        )
+        return default
+
+
+    def prepare_output_for_storage(
+        self,
+        value: Any,
+        output_storage_format: Any = "base64",
+    ) -> dict[str, Any]:
+        output_text, original_output_size, output_truncated = self.truncate_output(value)
+        output_raw = output_text.encode("utf-8", errors="replace")
+
+        normalized_format = self.normalize_output_storage_format(
+            output_storage_format,
+            default="base64",
+        )
+
+        if normalized_format == "base64":
+            stored_output = base64.b64encode(output_raw).decode("ascii")
+            output_encoding = "base64"
+            stored_output_size = len(stored_output.encode("ascii"))
+        else:
+            stored_output = output_text
+            output_encoding = "text"
+            stored_output_size = len(output_raw)
+
+        return {
+            "output": stored_output,
+            "output_encoding": output_encoding,
+            "output_size": len(output_raw),
+            "stored_output_size": stored_output_size,
+            "output_truncated": output_truncated,
+            "original_output_size": original_output_size,
+        }
 
     def _default_state(self) -> dict[str, Any]:
         now = self._utc_now()
