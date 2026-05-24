@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import logging
 from typing import Any
 
 from src.treeadmin.client import api
 from src.treeadmin.client import state
 from src.treeadmin.client.terminal import ui_print
 
-import base64
-import binascii
-import logging
 
 logger = logging.getLogger(__name__)
+
 
 def _output_size(value: Any) -> int:
     if value is None:
@@ -27,35 +28,40 @@ def _short_text(value: Any, limit: int = 180) -> str:
 
     return text[: limit - 3] + "..."
 
+
 def _decode_output_for_display(payload: dict[str, Any]) -> str:
     output = str(payload.get("output", ""))
-    encoding = str(payload.get("output_encoding", "text") or "text").strip().lower()
 
-    if encoding != "base64":
+    encoding = str(
+        payload.get(
+            "output_encoding",
+            payload.get("output_storage_format", "text"),
+        )
+        or "text"
+    ).strip().lower()
+
+    if encoding not in {"base64", "b64"}:
         return output
 
     try:
         raw = base64.b64decode(output.encode("ascii"), validate=True)
     except (binascii.Error, UnicodeEncodeError):
-        return (
-            "[TreeAdmin: failed to decode base64 output; raw stored value follows]\n"
-            + output
-        )
+        return output
 
     return raw.decode("utf-8", errors="replace")
 
+
 def format_response_payload(payload: dict[str, Any]) -> str:
-    output = str(payload.get("output", "")).strip()
+    output = _decode_output_for_display(payload).strip()
     error = payload.get("error")
 
-    lines: list[str] = [ "", "\n"]
     if output:
-        lines.append(output)
+        return "\n" + output
 
     if error:
-        lines.append(error)
+        return "\n" + str(error).strip()
 
-    return "\n".join(lines)
+    return ""
 
 
 def print_response_payload(payload: dict[str, Any]) -> None:
