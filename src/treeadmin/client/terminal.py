@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+import select
 import sys
 import threading
 
@@ -44,10 +44,7 @@ class TerminalUI:
             self._render_input_locked()
 
         try:
-            if os.name == "nt":
-                return self._input_windows()
-
-            return self._input_posix()
+            return self._input_linux()
         finally:
             with self._lock:
                 self._input_active = False
@@ -91,35 +88,10 @@ class TerminalUI:
         with self._lock:
             sys.stdout.write("\n")
             sys.stdout.flush()
+
         raise KeyboardInterrupt
 
-    def _input_windows(self) -> str:
-        import msvcrt
-
-        while True:
-            ch = msvcrt.getwch()
-
-            if ch in {"\x00", "\xe0"}:
-                try:
-                    msvcrt.getwch()
-                except Exception:
-                    pass
-                continue
-
-            if ch == "\x03":
-                self._cancel_input()
-
-            if ch in {"\r", "\n"}:
-                return self._finish_input()
-
-            if ch in {"\b", "\x7f"}:
-                self._backspace()
-                continue
-
-            if ch and ch.isprintable():
-                self._append_char(ch)
-
-    def _input_posix(self) -> str:
+    def _input_linux(self) -> str:
         import termios
         import tty
 
@@ -146,7 +118,11 @@ class TerminalUI:
                     continue
 
                 if ch == "\x1b":
-                    # Ignore escape sequences, for example arrow keys.
+                    while True:
+                        readable, _, _ = select.select([sys.stdin], [], [], 0.001)
+                        if not readable:
+                            break
+                        sys.stdin.read(1)
                     continue
 
                 if ch and ch.isprintable():

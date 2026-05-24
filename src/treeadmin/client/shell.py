@@ -26,7 +26,6 @@ AVAILABLE_PATTERNS: list[dict[str, str]] = [
     {
         "name": "Save output to file",
         "syntax": "#F[путь_к_файлу]F#",
-        "example_windows": r"dir #F[C:\Temp\dir_result.txt]F#",
         "example_linux": "ls -la #F[/tmp/ls_result.txt]F#",
         "regex": r"\s+#F\[(.+?)\]F#\s*$",
         "description": (
@@ -117,7 +116,6 @@ def _print_available_patterns() -> None:
     for index, item in enumerate(AVAILABLE_PATTERNS, start=1):
         lines.append(f"{index}) {item['name']}")
         lines.append(f"   Syntax:          {item['syntax']}")
-        lines.append(f"   Windows example: {item['example_windows']}")
         lines.append(f"   Linux example:   {item['example_linux']}")
         lines.append(f"   Regex:           {item['regex']}")
         lines.append(f"   Description:     {item['description']}")
@@ -138,7 +136,7 @@ def _print_help() -> None:
         "  close      close remote session and leave\n"
         "\nCommand patterns:\n"
         "  Use 'patterns' to show all supported command patterns.\n"
-        "  Current pattern example: dir #F[C:\\Temp\\dir_result.txt]F#"
+        "  Current pattern example: ls -la #F[/tmp/ls_result.txt]F#"
     )
 
 

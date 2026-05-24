@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import logging
 import os
-import platform
 import select
 import signal
 import subprocess
+import sys
 import threading
 import time
-import uuid
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
 
 class SessionManager:
     def __init__(
@@ -20,6 +20,9 @@ class SessionManager:
         session_ttl_seconds: int = 15 * 60,
         session_cleaner_interval: int = 30,
     ) -> None:
+        if not sys.platform.startswith("linux"):
+            raise RuntimeError("TreeAdmin server shell sessions support Linux only")
+
         self.node_id = node_id
         self.session_ttl_seconds = session_ttl_seconds
         self.session_cleaner_interval = session_cleaner_interval
@@ -38,7 +41,7 @@ class SessionManager:
         logger.info(
             "session manager initialized : node_id=%s session_ttl_seconds=%s "
             "session_cleaner_interval=%s command_timeout_seconds=%s "
-            "command_output_limit_bytes=%s",
+            "command_output_limit_bytes=%s platform=linux",
             self.node_id,
             self.session_ttl_seconds,
             self.session_cleaner_interval,
@@ -85,170 +88,73 @@ class SessionManager:
             #
             return default
 
-    def _get_platform_name(self) -> str:
-        system_name = platform.system().lower()
-
-        if system_name.startswith("win"):
-            return "windows"
-
-        if system_name in {"linux", "darwin"}:
-            return "posix"
-
-        return "posix"
-
     @staticmethod
     def close_session_resources_static(session: dict) -> None:
-        platform_name = session.get("platform")
         process = session.get("process")
 
-        if platform_name == "windows" and process is not None:
-            try:
-                if process.poll() is None:
-                    process.stdin.write("exit\n")
-                    process.stdin.flush()
-                    process.wait(timeout=3)
-            except Exception:
-                # log
-                logger.warning(
-                    "session process graceful close failed",
-                    platform_name,
-                    exc_info=True,
-                )
-                #
-                try:
-                    process.kill()
-                    # log
-                    logger.warning(
-                        "session process killed",
-                        platform_name,
-                    )
-                    #
-                except Exception:
-                    # log
-                    logger.exception("session process kill failed")
-                    #
-                    #pass
+        if process is None:
+            return
 
-        if platform_name == "posix" and process is not None:
+        try:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=3)
+        except Exception:
+            # log
+            logger.warning(
+                "linux session process graceful close failed",
+                exc_info=True,
+            )
+            #
+
             try:
-                if process.poll() is None:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    process.wait(timeout=3)
+                os.killpg(process.pid, signal.SIGKILL)
+
+                # log
+                logger.warning("linux session process killed")
+                #
             except Exception:
                 # log
-                logger.warning(
-                    "posix session process graceful close failed",
-                    platform_name,
-                    exc_info=True,
-                )
+                logger.exception("linux session process kill failed")
                 #
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    # log
-                    logger.warning(
-                        "posix session process killed",
-                        platform_name,
-                    )
-                    #
-                except Exception:
-                    # log
-                    logger.exception("posix session process kill failed")
-                    #
-                    #pass
 
     def open_session(self) -> dict:
         with self._lock:
             session_id = str(self._next_session_id)
             self._next_session_id += 1
 
-        platform_name = self._get_platform_name()
         now = time.time()
+        start_cwd = str(Path.home())
 
-        try:
-            if platform_name == "windows":
-                desktop = Path.home() / "Desktop"
-                start_cwd = str(desktop if desktop.exists() else Path.home())
+        session = {
+            "platform": "linux",
+            "process": None,
+            "lock": threading.Lock(),
+            "cwd": start_cwd,
+            "previous_cwd": start_cwd,
+            "created_at": now,
+            "last_activity": now,
+            "node_id": self.node_id,
+        }
 
-                process = subprocess.Popen(
-                    ["cmd.exe", "/Q", "/K"],
-                    cwd=start_cwd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="cp866",
-                    bufsize=1,
-                )
+        with self._lock:
+            self._sessions[session_id] = session
+            sessions_count = len(self._sessions)
 
-                process.stdin.write("prompt __PROMPT__$\n")
-                process.stdin.write("cd\n")
-                process.stdin.write("echo __OPEN_END__\n")
-                process.stdin.flush()
+        # log
+        logger.info(
+            "session opened : session_id=%s platform=linux cwd=%s sessions_count=%s",
+            session_id,
+            session.get("cwd"),
+            sessions_count,
+        )
+        #
 
-                lines: list[str] = []
-                while True:
-                    line = process.stdout.readline()
-                    if not line:
-                        break
-                    if "__OPEN_END__" in line:
-                        break
-                    lines.append(line)
-
-                cwd_raw = "".join(lines).replace("__PROMPT__", "").strip()
-                if ">" in cwd_raw:
-                    cwd_raw = cwd_raw.split(">")[-1].strip()
-
-                session = {
-                    "platform": "windows",
-                    "process": process,
-                    "lock": threading.Lock(),
-                    "cwd": cwd_raw or start_cwd,
-                    "previous_cwd": cwd_raw or start_cwd,
-                    "created_at": now,
-                    "last_activity": now,
-                    "node_id": self.node_id,
-                }
-            else:
-                start_cwd = str(Path.home())
-                session = {
-                    "platform": "posix",
-                    "process": None,
-                    "lock": threading.Lock(),
-                    "cwd": start_cwd,
-                    "previous_cwd": start_cwd,
-                    "created_at": now,
-                    "last_activity": now,
-                    "node_id": self.node_id,
-                }
-
-            with self._lock:
-                self._sessions[session_id] = session
-                sessions_count = len(self._sessions)
-            
-            # log
-            logger.info(
-                    "session opened : session_id=%s platform=%s cwd=%s sessions_count=%s",
-                    session_id,
-                    session.get("platform"),
-                    session.get("cwd"),
-                    sessions_count,
-                )
-            #
-
-            return {
-                "session_id": session_id,
-                "cwd": session["cwd"],
-                "node_id": self.node_id,
-            }
-        except Exception:
-            # log
-            logger.exception(
-                "session open failed : session_id=%s platform=%s",
-                session_id,
-                platform_name,
-            )
-            #
-            raise
+        return {
+            "session_id": session_id,
+            "cwd": session["cwd"],
+            "node_id": self.node_id,
+        }
 
     def get_session(self, session_id: str) -> dict | None:
         with self._lock:
@@ -259,17 +165,19 @@ class SessionManager:
             items = list(self._sessions.items())
 
         result: list[dict] = []
+
         for session_id, session in items:
             result.append(
                 {
                     "session_id": session_id,
                     "cwd": str(session.get("cwd", "")),
-                    "platform": str(session.get("platform", "")),
+                    "platform": str(session.get("platform", "linux")),
                     "created_at": session.get("created_at"),
                     "last_activity": session.get("last_activity"),
                     "node_id": str(session.get("node_id", self.node_id)),
                 }
             )
+
         return result
 
     def touch_session(self, session_id: str) -> bool:
@@ -277,31 +185,36 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if session is None:
                 return False
+
             session["last_activity"] = time.time()
             return True
 
     def close_session(self, session_id: str) -> dict | None:
         with self._lock:
             session = self._sessions.pop(session_id, None)
-            sessions_count = len(self._sessions) # for log
+            sessions_count = len(self._sessions)
 
-        # log
         if session is None:
+            # log
             logger.warning(
                 "session close skipped [not found] : session_id=%s",
-                session_id
+                session_id,
             )
+            #
             return None
 
         try:
-            self.close_session_resources_static(session) # not in log
+            self.close_session_resources_static(session)
         except Exception:
+            # log
             logger.exception(
                 "session close resources failed : session_id=%s",
-                session_id
+                session_id,
             )
+            #
             raise
 
+        # log
         logger.info(
             "session closed : session_id=%s platform=%s cwd=%s sessions_count=%s",
             session_id,
@@ -316,6 +229,7 @@ class SessionManager:
     @staticmethod
     def _strip_quotes(value: str) -> str:
         value = value.strip()
+
         if (value.startswith('"') and value.endswith('"')) or (
             value.startswith("'") and value.endswith("'")
         ):
@@ -323,7 +237,7 @@ class SessionManager:
 
         return value
 
-    def _resolve_posix_cd_target(
+    def _resolve_linux_cd_target(
         self,
         session: dict,
         cwd: str,
@@ -374,7 +288,7 @@ class SessionManager:
 
         return captured_size, False
 
-    def _terminate_posix_process_group(
+    def _terminate_linux_process_group(
         self,
         process: subprocess.Popen,
         command: str,
@@ -383,7 +297,7 @@ class SessionManager:
     ) -> None:
         # log
         logger.warning(
-            "posix command timeout : cwd=%s timeout=%s command=[%s]",
+            "linux command timeout : cwd=%s timeout=%s command=[%s]",
             cwd,
             timeout,
             command,
@@ -395,7 +309,7 @@ class SessionManager:
         except Exception:
             # log
             logger.debug(
-                "posix command terminate process group failed : pid=%s command=[%s]",
+                "linux command terminate process group failed : pid=%s command=[%s]",
                 process.pid,
                 command,
                 exc_info=True,
@@ -413,7 +327,7 @@ class SessionManager:
         except Exception:
             # log
             logger.debug(
-                "posix command kill process group failed : pid=%s command=[%s]",
+                "linux command kill process group failed : pid=%s command=[%s]",
                 process.pid,
                 command,
                 exc_info=True,
@@ -425,14 +339,14 @@ class SessionManager:
         except Exception:
             # log
             logger.debug(
-                "posix command wait after kill failed : pid=%s command=[%s]",
+                "linux command wait after kill failed : pid=%s command=[%s]",
                 process.pid,
                 command,
                 exc_info=True,
             )
             #
 
-    def _run_posix_command_limited(self, command: str, cwd: str) -> tuple[str, int | None]:
+    def _run_linux_command_limited(self, command: str, cwd: str) -> tuple[str, int | None]:
         try:
             process = subprocess.Popen(
                 ["/bin/bash", "-lc", command],
@@ -445,7 +359,7 @@ class SessionManager:
         except Exception:
             # log
             logger.exception(
-                "posix command start failed : cwd=%s command=[%s]",
+                "linux command start failed : cwd=%s command=[%s]",
                 cwd,
                 command,
             )
@@ -455,7 +369,7 @@ class SessionManager:
         if process.stdout is None:
             # log
             logger.error(
-                "posix command start failed [missing stdout pipe] : cwd=%s command=[%s]",
+                "linux command start failed [missing stdout pipe] : cwd=%s command=[%s]",
                 cwd,
                 command,
             )
@@ -475,7 +389,7 @@ class SessionManager:
 
         # log
         logger.debug(
-            "posix command started : pid=%s cwd=%s timeout=%s output_limit=%s command=[%s]",
+            "linux command started : pid=%s cwd=%s timeout=%s output_limit=%s command=[%s]",
             process.pid,
             cwd,
             timeout,
@@ -485,9 +399,14 @@ class SessionManager:
         #
 
         while True:
-            if deadline is not None and time.monotonic() > deadline and process.poll() is None:
+            if (
+                deadline is not None
+                and not timed_out
+                and time.monotonic() > deadline
+                and process.poll() is None
+            ):
                 timed_out = True
-                self._terminate_posix_process_group(process, command, cwd, timeout)
+                self._terminate_linux_process_group(process, command, cwd, timeout)
 
             try:
                 readable, _, _ = select.select([fd], [], [], 0.05)
@@ -533,6 +452,7 @@ class SessionManager:
                         limit,
                     )
                     truncated = truncated or was_truncated
+
                 break
 
         returncode = process.returncode
@@ -552,7 +472,7 @@ class SessionManager:
 
         # log
         logger.debug(
-            "posix command finished : pid=%s cwd=%s returncode=%s output_size=%s "
+            "linux command finished : pid=%s cwd=%s returncode=%s output_size=%s "
             "captured_size=%s truncated=%s timed_out=%s command=[%s]",
             process.pid,
             cwd,
@@ -582,103 +502,16 @@ class SessionManager:
         with session["lock"]:
             session["last_activity"] = time.time()
 
-            if session.get("platform") == "windows":
-                process = session.get("process")
-
-                if process is None:
-                    # log
-                    logger.error(
-                        "session execute failed [missing process] : session_id=%s node_id=%s",
-                        session_id,
-                        self.node_id
-                    )
-                    #
-                    raise RuntimeError("windows shell process is missing")
-                if process.poll() is not None:
-                    # log
-                    logger.error(
-                        "session execute failed [process terminated] : session_id=%s node_id=%s",
-                        session_id,
-                        self.node_id
-                    )
-                    #
-                    raise RuntimeError("shell process already terminated")
-
-                try: 
-                    cmd_marker = f"__END__{uuid.uuid4().hex}__"
-                    rc_marker = f"__RC__{uuid.uuid4().hex}__"
-                    cwd_marker = f"__CWD__{uuid.uuid4().hex}__"
-
-                    process.stdin.write(command + "\n")
-                    process.stdin.write(f"echo {cmd_marker}\n")
-                    process.stdin.write(f"echo {rc_marker}%errorlevel%\n")
-                    process.stdin.flush()
-
-                    output_lines: list[str] = []
-                    while True:
-                        line = process.stdout.readline()
-                        if not line:
-                            break
-                        if cmd_marker in line:
-                            break
-                        output_lines.append(line)
-
-                    returncode: int | None = None
-                    while True:
-                        line = process.stdout.readline()
-                        if not line:
-                            break
-                        if rc_marker in line:
-                            value = line.replace(rc_marker, "").strip()
-                            try:
-                                returncode = int(value)
-                            except ValueError:
-                                returncode = None
-                            break
-
-                    process.stdin.write("cd\n")
-                    process.stdin.write(f"echo {cwd_marker}\n")
-                    process.stdin.flush()
-
-                    cwd_lines: list[str] = []
-                    while True:
-                        line = process.stdout.readline()
-                        if not line:
-                            break
-                        if cwd_marker in line:
-                            break
-                        cwd_lines.append(line)
-
-                    output = "".join(output_lines).replace("__PROMPT__", "").strip()
-                    cwd_raw = "".join(cwd_lines).replace("__PROMPT__", "").strip()
-
-                    if ">" in cwd_raw:
-                        cwd_raw = cwd_raw.split(">")[-1].strip()
-
-                    cwd = cwd_raw or str(session.get("cwd", ""))
-                    session["cwd"] = cwd
-                    session["last_activity"] = time.time()
-                    return output, cwd, returncode
-                except Exception:
-                    # log
-                    logger.exception(
-                        "session execute failed : session_id=%s node_id=%s platform=windows command=[%s]",
-                        session_id,
-                        self.node_id,
-                        command
-                    )
-                    #
-                    raise
-
             cwd = str(session.get("cwd", str(Path.home()))).strip() or str(Path.home())
             cmd = command.strip()
 
             try:
                 if not cmd:
                     output, new_cwd, returncode = "", cwd, 0
+
                 elif cmd == "cd" or cmd.startswith("cd "):
                     raw_target = "" if cmd == "cd" else cmd[3:].strip()
-                    candidate, echo_value = self._resolve_posix_cd_target(
+                    candidate, echo_value = self._resolve_linux_cd_target(
                         session,
                         cwd,
                         raw_target,
@@ -695,21 +528,25 @@ class SessionManager:
                         output = echo_value or ""
                         new_cwd = candidate
                         returncode = 0
+
                 else:
-                    output, returncode = self._run_posix_command_limited(command, cwd)
+                    output, returncode = self._run_linux_command_limited(command, cwd)
                     new_cwd = cwd
 
                 session["cwd"] = new_cwd
                 session["last_activity"] = time.time()
+
                 return output.strip(), new_cwd, returncode
+
             except Exception:
                 # log
                 logger.exception(
-                    "session execute failed : session_id=%s node_id=%s platform=posix command=[%s] cwd=%s",
+                    "session execute failed : session_id=%s node_id=%s "
+                    "platform=linux command=[%s] cwd=%s",
                     session_id,
                     self.node_id,
                     command,
-                    cwd
+                    cwd,
                 )
                 #
                 raise
@@ -723,12 +560,14 @@ class SessionManager:
                 last_activity = float(session.get("last_activity", now))
                 if now - last_activity > self.session_ttl_seconds:
                     expired.append((session_id, self._sessions.pop(session_id)))
-        # log
+
         if expired:
+            # log
             logger.info(
                 "expired sessions popped : node_id=%s count=%s",
                 self.node_id,
                 len(expired),
             )
-        #
+            #
+
         return expired
