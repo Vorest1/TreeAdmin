@@ -55,7 +55,7 @@ def format_response_payload(payload: dict[str, Any]) -> str:
     if error:
         lines.append(error)
 
-    return lines
+    return "\n".join(lines)
 
 
 def print_response_payload(payload: dict[str, Any]) -> None:
