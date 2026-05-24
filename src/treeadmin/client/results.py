@@ -45,25 +45,16 @@ def _decode_output_for_display(payload: dict[str, Any]) -> str:
     return raw.decode("utf-8", errors="replace")
 
 def format_response_payload(payload: dict[str, Any]) -> str:
-    node_id = str(payload.get("node_id", "unknown-node"))
-    session_id = str(payload.get("session_id", ""))
-    job_id = str(payload.get("job_id", ""))
-    command = str(payload.get("command", ""))
-    output = _decode_output_for_display(payload)
+    output = str(payload.get("output", "")).strip()
     error = payload.get("error")
 
-    lines: list[str] = [
-        "",
-        f"[from {node_id}][session {session_id}][job {job_id}] {command}",
-    ]
-
     if output:
-        lines.append(output)
+        return "\n" + output
 
     if error:
-        lines.append(f"[error={error}]")
+        return "\n" + str(error).strip()
 
-    return "\n".join(lines)
+    return ""
 
 
 def print_response_payload(payload: dict[str, Any]) -> None:
