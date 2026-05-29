@@ -8,7 +8,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,7 @@ class JobsStore:
     def _acquire_process_lock(self):
         # type: () -> None
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        self._process_lock_file = open(self.lock_path, "a+", encoding="utf-8")
+        self._process_lock_file = open(str(self.lock_path), "a+", encoding="utf-8")
 
         if os.name != "posix":
             # log
@@ -361,9 +361,9 @@ class JobsStore:
             return
 
         try:
-            shutil.copyfile(self.path, self.backup_path)
+            shutil.copyfile(str(self.path), str(self.backup_path))
 
-            with open(self.backup_path, "r+b") as f:
+            with open(str(self.backup_path), "r+b") as f:
                 self._safe_fsync_file(
                     f,
                     path=self.backup_path,
@@ -406,7 +406,7 @@ class JobsStore:
                 + b"\n"
             )
 
-            with open(tmp_path, "wb") as f:
+            with open(str(tmp_path), "wb") as f:
                 f.write(encoded)
                 self._safe_fsync_file(
                     f,
@@ -417,7 +417,7 @@ class JobsStore:
             if create_backup:
                 self._backup_current_state()
 
-            os.replace(tmp_path, path)
+            os.replace(str(tmp_path), str(path))
             self._fsync_dir(path.parent)
         except Exception:
             # log
@@ -619,7 +619,7 @@ class JobsStore:
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            with open(self.journal_path, "a", encoding="utf-8") as f:
+            with open(str(self.journal_path), "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
                 f.write("\n")
                 self._safe_fsync_file(
