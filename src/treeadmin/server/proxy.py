@@ -1,7 +1,6 @@
-from __future__ import annotations
-
 import http.client
 import logging
+from typing import Dict, List, Tuple, Any
 from urllib.parse import parse_qs
 
 from src.treeadmin.routing import (
@@ -11,9 +10,11 @@ from src.treeadmin.routing import (
 
 logger = logging.getLogger(__name__)
 
+
 class ProxySupport:
-    def extract_extra_query(self, qs: dict[str, list[str]]) -> dict[str, str]:
-        extra: dict[str, str] = {}
+    def extract_extra_query(self, qs):
+        # type: (Dict[str, List[str]]) -> Dict[str, str]
+        extra = {}  # type: Dict[str, str]
 
         for key, values in qs.items():
             if key in {"route", "hop"}:
@@ -31,6 +32,7 @@ class ProxySupport:
         return extra
 
     def resolve_route(self, parsed):
+        # type: (Any) -> Tuple[Dict[str, List[str]], List[Dict[str, Any]], int]
         try:
             qs = parse_qs(parsed.query, keep_blank_values=True)
             hops, hop_index = parse_route_params(qs)
@@ -57,7 +59,7 @@ class ProxySupport:
             attr = getattr(parsed, "path", "")
             text = str(attr)
             if len(text) > 500:
-                text[: 500 - 3] + "..."
+                text = text[: 500 - 3] + "..."
 
             logger.warning(
                 "proxy_route_resolve_failed path=%s query=%s",
@@ -68,7 +70,8 @@ class ProxySupport:
             raise
         #
 
-    def forward(self, handler, host: str, port: int, method: str, path: str, body: bytes) -> None:
+    def forward(self, handler, host, port, method, path, body):
+        # type: (Any, str, int, str, str, bytes) -> None
         conn = http.client.HTTPConnection(host, port, timeout=60)
         
         #log
@@ -81,7 +84,7 @@ class ProxySupport:
         #
 
         try:
-            headers: dict[str, str] = {}
+            headers = {}  # type: Dict[str, str]
 
             content_type = handler.headers.get("Content-Type")
             if content_type:
@@ -102,7 +105,7 @@ class ProxySupport:
 
         except Exception as e:
             logger.error("proxy error: %s", e)
-            handler._send_text(502, f"proxy error: {e}")
+            handler._send_text(502, "proxy error: {}".format(e))
         finally:
             try:
                 conn.close()

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 import os
 import select
@@ -9,6 +7,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +15,11 @@ logger = logging.getLogger(__name__)
 class SessionManager:
     def __init__(
         self,
-        node_id: str,
-        session_ttl_seconds: int = 15 * 60,
-        session_cleaner_interval: int = 30,
-    ) -> None:
+        node_id,
+        session_ttl_seconds=15 * 60,
+        session_cleaner_interval=30,
+    ):
+        # type: (str, int, int) -> None
         if not sys.platform.startswith("linux"):
             raise RuntimeError("TreeAdmin server shell sessions support Linux only")
 
@@ -33,7 +33,7 @@ class SessionManager:
             512 * 1024,
         )
 
-        self._sessions: dict[str, dict] = {}
+        self._sessions = {}  # type: Dict[str, Dict[str, Any]]
         self._next_session_id = 1
         self._lock = threading.RLock()
 
@@ -51,7 +51,8 @@ class SessionManager:
         #
 
     @staticmethod
-    def _env_int(name: str, default: int) -> int:
+    def _env_int(name, default):
+        # type: (str, int) -> int
         raw = os.getenv(name)
         if raw is None or not raw.strip():
             return default
@@ -70,7 +71,8 @@ class SessionManager:
             return default
 
     @staticmethod
-    def _env_float(name: str, default: float) -> float:
+    def _env_float(name, default):
+        # type: (str, float) -> float
         raw = os.getenv(name)
         if raw is None or not raw.strip():
             return default
@@ -89,7 +91,8 @@ class SessionManager:
             return default
 
     @staticmethod
-    def close_session_resources_static(session: dict) -> None:
+    def close_session_resources_static(session):
+        # type: (Dict[str, Any]) -> None
         process = session.get("process")
 
         if process is None:
@@ -118,7 +121,8 @@ class SessionManager:
                 logger.exception("linux session process kill failed")
                 #
 
-    def open_session(self) -> dict:
+    def open_session(self):
+        # type: () -> Dict[str, Any]
         with self._lock:
             session_id = str(self._next_session_id)
             self._next_session_id += 1
@@ -156,15 +160,17 @@ class SessionManager:
             "node_id": self.node_id,
         }
 
-    def get_session(self, session_id: str) -> dict | None:
+    def get_session(self, session_id):
+        # type: (str) -> Optional[Dict[str, Any]]
         with self._lock:
             return self._sessions.get(session_id)
 
-    def list_sessions(self) -> list[dict]:
+    def list_sessions(self):
+        # type: () -> List[Dict[str, Any]]
         with self._lock:
             items = list(self._sessions.items())
 
-        result: list[dict] = []
+        result = []  # type: List[Dict[str, Any]]
 
         for session_id, session in items:
             result.append(
@@ -180,7 +186,8 @@ class SessionManager:
 
         return result
 
-    def touch_session(self, session_id: str) -> bool:
+    def touch_session(self, session_id):
+        # type: (str) -> bool
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
@@ -189,7 +196,8 @@ class SessionManager:
             session["last_activity"] = time.time()
             return True
 
-    def close_session(self, session_id: str) -> dict | None:
+    def close_session(self, session_id):
+        # type: (str) -> Optional[Dict[str, Any]]
         with self._lock:
             session = self._sessions.pop(session_id, None)
             sessions_count = len(self._sessions)
@@ -227,7 +235,8 @@ class SessionManager:
         return session
 
     @staticmethod
-    def _strip_quotes(value: str) -> str:
+    def _strip_quotes(value):
+        # type: (str) -> str
         value = value.strip()
 
         if (value.startswith('"') and value.endswith('"')) or (
@@ -239,10 +248,11 @@ class SessionManager:
 
     def _resolve_linux_cd_target(
         self,
-        session: dict,
-        cwd: str,
-        target: str,
-    ) -> tuple[str, str | None]:
+        session,
+        cwd,
+        target,
+    ):
+        # type: (Dict[str, Any], str, str) -> Tuple[str, Optional[str]]
         target = self._strip_quotes(target)
         home = str(Path.home())
 
@@ -264,11 +274,12 @@ class SessionManager:
 
     def _append_limited_output(
         self,
-        output_parts: list[bytes],
-        chunk: bytes,
-        captured_size: int,
-        limit: int,
-    ) -> tuple[int, bool]:
+        output_parts,
+        chunk,
+        captured_size,
+        limit,
+    ):
+        # type: (List[bytes], bytes, int, int) -> Tuple[int, bool]
         if not chunk:
             return captured_size, False
 
@@ -290,11 +301,12 @@ class SessionManager:
 
     def _terminate_linux_process_group(
         self,
-        process: subprocess.Popen,
-        command: str,
-        cwd: str,
-        timeout: float,
-    ) -> None:
+        process,
+        command,
+        cwd,
+        timeout,
+    ):
+        # type: (subprocess.Popen, str, str, float) -> None
         # log
         logger.warning(
             "linux command timeout : cwd=%s timeout=%s command=[%s]",
@@ -346,7 +358,8 @@ class SessionManager:
             )
             #
 
-    def _run_linux_command_limited(self, command: str, cwd: str) -> tuple[str, int | None]:
+    def _run_linux_command_limited(self, command, cwd):
+        # type: (str, str) -> Tuple[str, Optional[int]]
         try:
             process = subprocess.Popen(
                 ["/bin/bash", "-lc", command],
@@ -376,7 +389,7 @@ class SessionManager:
             #
             raise RuntimeError("process stdout pipe is missing")
 
-        output_parts: list[bytes] = []
+        output_parts = []  # type: List[bytes]
         captured_size = 0
         observed_size = 0
         truncated = False
@@ -461,12 +474,15 @@ class SessionManager:
 
         if truncated:
             output += (
-                f"\n\n[TreeAdmin: command output truncated in executor; "
-                f"captured_limit={limit} bytes; observed_output_size={observed_size} bytes]"
+                "\n\n[TreeAdmin: command output truncated in executor; "
+                "captured_limit={} bytes; observed_output_size={} bytes]".format(
+                    limit,
+                    observed_size,
+                )
             )
 
         if timed_out:
-            output += f"\n\n[TreeAdmin: command timed out after {timeout} seconds]"
+            output += "\n\n[TreeAdmin: command timed out after {} seconds]".format(timeout)
             if returncode is None:
                 returncode = 124
 
@@ -487,7 +503,8 @@ class SessionManager:
 
         return output.strip(), returncode
 
-    def execute(self, session_id: str, command: str) -> tuple[str, str, int | None]:
+    def execute(self, session_id, command):
+        # type: (str, str) -> Tuple[str, str, Optional[int]]
         session = self.get_session(session_id)
         if not session:
             # log
@@ -519,7 +536,7 @@ class SessionManager:
 
                     if not os.path.isdir(candidate):
                         output, new_cwd, returncode = (
-                            f"cd: no such directory: {raw_target}",
+                            "cd: no such directory: {}".format(raw_target),
                             cwd,
                             1,
                         )
@@ -551,9 +568,10 @@ class SessionManager:
                 #
                 raise
 
-    def pop_expired_sessions(self) -> list[tuple[str, dict]]:
+    def pop_expired_sessions(self):
+        # type: () -> List[Tuple[str, Dict[str, Any]]]
         now = time.time()
-        expired: list[tuple[str, dict]] = []
+        expired = []  # type: List[Tuple[str, Dict[str, Any]]]
 
         with self._lock:
             for session_id, session in list(self._sessions.items()):

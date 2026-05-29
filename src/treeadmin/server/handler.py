@@ -1,10 +1,9 @@
-from __future__ import annotations
-
 import json
 import logging
 import sys
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
+from typing import Any, Dict
 from urllib.parse import urlparse
 
 from src.treeadmin.routing import build_forward_request, format_route, is_final_hop
@@ -17,6 +16,7 @@ SILENT_LOG_PATHS = {
     "/ack_response",
     "/results_summary",
 }
+
 
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -38,44 +38,51 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     @staticmethod
-    def _is_silent_path(path: str) -> bool:
+    def _is_silent_path(path):
+        # type: (str) -> bool
         return path in SILENT_LOG_PATHS
 
-    def _prepare_request_logging_state(self, path: str) -> bool:
+    def _prepare_request_logging_state(self, path):
+        # type: (str) -> bool
         self._request_path = path
         self._suppress_access_log = self._is_silent_path(path)
         return self._suppress_access_log
 
-    def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+    def _send_bytes(self, status, body, content_type):
+        # type: (int, bytes, str) -> None
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_text(self, status: int, text: str) -> None:
+    def _send_text(self, status, text):
+        # type: (int, str) -> None
         self._send_bytes(status, text.encode("utf-8"), "text/plain; charset=utf-8")
 
-    def _send_json(self, status: int, data: dict) -> None:
+    def _send_json(self, status, data):
+        # type: (int, Dict[str, Any]) -> None
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self._send_bytes(body=body, status=status, content_type="application/json; charset=utf-8")
 
-    def _read_body(self) -> bytes:
+    def _read_body(self):
+        # type: () -> bytes
         length = int(self.headers.get("Content-Length", "0") or "0")
         return self.rfile.read(length) if length > 0 else b""
 
-    def _load_json_payload(self, body: bytes) -> dict:
+    def _load_json_payload(self, body):
+        # type: (bytes) -> Dict[str, Any]
         if not body:
             return {}
 
         content_type = self.headers.get("Content-Type", "")
         if "application/json" not in content_type:
-            raise ValueError(f"expected application/json: {content_type}")
+            raise ValueError("expected application/json: {}".format(content_type))
 
         try:
             payload = json.loads(body.decode("utf-8"))
         except Exception as e:
-            raise ValueError(f"bad json: {e}") from e
+            raise ValueError("bad json: {}".format(e))
 
         if not isinstance(payload, dict):
             raise ValueError("json body must be object")
@@ -126,7 +133,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 client_ip,
             )
             #
-            print(f"ROUTE: {format_route(hops)} | hop={hop_index}")
+            print("ROUTE: {} | hop={}".format(format_route(hops), hop_index))
 
         if not is_final_hop(hops, hop_index):
             try:
@@ -145,7 +152,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     hop_index
                 )
                 #
-                self._send_text(500, f"route forward error: {e}")
+                self._send_text(500, "route forward error: {}".format(e))
                 return
             # log
             logger.debug(
@@ -158,7 +165,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             )
             #
             if not silent:
-                print(f"PROXY: forward GET -> {next_host}:{next_port} {next_path}")
+                print(
+                    "PROXY: forward GET -> {}:{} {}".format(
+                        next_host,
+                        next_port,
+                        next_path
+                    )
+                )
 
             self.server.proxy.forward(self, next_host, next_port, "GET", next_path, b"")
             return
@@ -172,7 +185,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 len(msg),
             )
             #
-            print(f"SERVER: receive ping: {msg}")
+            print("SERVER: receive ping: {}".format(msg))
             self._send_text(200, "Hello, Client")
             return
 
@@ -292,7 +305,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._send_text(400, "failed to read request body")
             return
 
-
         if not silent:
             # log
             logger.debug(
@@ -301,7 +313,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 client_ip,
             )
             #
-            print(f"ROUTE: {format_route(hops)} | hop={hop_index}")
+            print("ROUTE: {} | hop={}".format(format_route(hops), hop_index))
 
         if not is_final_hop(hops, hop_index):
             try:
@@ -320,7 +332,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     hop_index
                 )
                 #
-                self._send_text(500, f"route forward error: {e}")
+                self._send_text(500, "route forward error: {}".format(e))
                 return
             
             logger.debug(
@@ -335,7 +347,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             )
 
             if not silent:
-                print(f"PROXY: forward POST -> {next_host}:{next_port} {next_path}")
+                print(
+                    "PROXY: forward POST -> {}:{} {}".format(
+                        next_host,
+                        next_port,
+                        next_path
+                    )
+                )
 
             self.server.proxy.forward(self, next_host, next_port, "POST", next_path, body)
             return
@@ -386,7 +404,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 # log
                 logger.exception("open_shell_failed client_ip=%s", client_ip)
                 #
-                self._send_text(500, f"open shell error: {e}")
+                self._send_text(500, "open shell error: {}".format(e))
             return
 
         if parsed.path == "/send_command":
@@ -564,13 +582,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         self._send_text(404, "not found")
 
-
     def log_request(self, code="-", size="-"):
         if getattr(self, "_suppress_access_log", False):
             return
 
         super().log_request(code, size)
-
 
     def log_message(self, fmt, *args):
         path = getattr(self, "_request_path", "") or urlparse(self.path).path
@@ -579,7 +595,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
 
         sys.stdout.write(
-            f'[{datetime.now().strftime("%d.%m.%Y %H:%M:%S")}] '
-            f'[NODE {self.client_address[0]}] '
-            f'{self.command} {path}\n'
+            "[{}] [NODE {}] {} {}\n".format(
+                datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
+                self.client_address[0],
+                self.command,
+                path,
+            )
         )

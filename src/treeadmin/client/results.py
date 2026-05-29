@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 import base64
 import binascii
 import logging
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from src.treeadmin.client import api
 from src.treeadmin.client import state
@@ -13,14 +11,16 @@ from src.treeadmin.client.terminal import ui_print
 logger = logging.getLogger(__name__)
 
 
-def _output_size(value: Any) -> int:
+def _output_size(value):
+    # type: (Any) -> int
     if value is None:
         return 0
 
     return len(str(value).encode("utf-8", errors="replace"))
 
 
-def _short_text(value: Any, limit: int = 180) -> str:
+def _short_text(value, limit=180):
+    # type: (Any, int) -> str
     text = str(value).strip()
 
     if len(text) <= limit:
@@ -29,7 +29,8 @@ def _short_text(value: Any, limit: int = 180) -> str:
     return text[: limit - 3] + "..."
 
 
-def _decode_output_for_display(payload: dict[str, Any]) -> str:
+def _decode_output_for_display(payload):
+    # type: (Dict[str, Any]) -> str
     output = str(payload.get("output", ""))
 
     encoding = str(
@@ -51,7 +52,8 @@ def _decode_output_for_display(payload: dict[str, Any]) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def format_response_payload(payload: dict[str, Any]) -> str:
+def format_response_payload(payload):
+    # type: (Dict[str, Any]) -> str
     output = _decode_output_for_display(payload).strip()
     error = payload.get("error")
 
@@ -64,16 +66,17 @@ def format_response_payload(payload: dict[str, Any]) -> str:
     return ""
 
 
-def print_response_payload(payload: dict[str, Any]) -> None:
+def print_response_payload(payload):
+    # type: (Dict[str, Any]) -> None
     ui_print(format_response_payload(payload))
 
 
 def pull_pending_results(
-    target_id: str,
-    session_id: str | None = None,
-    *,
-    quiet: bool = False,
-) -> int:
+    target_id,
+    session_id=None,
+    quiet=False,
+):
+    # type: (str, Optional[str], bool) -> int 
 
     pull_lock = state.get_pull_lock(target_id, session_id)
 
@@ -103,7 +106,7 @@ def pull_pending_results(
             )
             #
             if not quiet:
-                ui_print(f"[{status}] failed to pull pending results: {result}")
+                ui_print("[{}] failed to pull pending results: {}".format(status, result))
             return 0
 
         if not isinstance(result, list):
@@ -117,10 +120,10 @@ def pull_pending_results(
             )
             #
             if not quiet:
-                ui_print(f"[502] invalid pull result: {result}")
+                ui_print("[502] invalid pull result: {}".format(result))
             return 0
 
-        response_ids_to_ack: list[str] = []
+        response_ids_to_ack = []  # type: List[str]
         printed_count = 0
 
         for item in result:
@@ -197,7 +200,12 @@ def pull_pending_results(
                 )
                 #
                 if not quiet:
-                    ui_print(f"[{ack_status}] failed to ack pulled results: {ack_raw}")
+                    ui_print(
+                        "[{}] failed to ack pulled results: {}".format(
+                            ack_status,
+                            ack_raw
+                        )
+                    )
             else:
                 # log
                 logger.debug(

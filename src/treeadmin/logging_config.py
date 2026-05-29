@@ -1,14 +1,13 @@
 # src/treeadmin/logging_config.py
 
-from __future__ import annotations
-
 import logging
 import logging.config
 import os
 from pathlib import Path
 
 
-def setup_logging(mode: str) -> None:
+def setup_logging(mode):
+    # type: (str) -> None
     if mode not in {"server", "client"}:
         raise ValueError("mode must be 'server' or 'client'")
 
@@ -39,8 +38,8 @@ def setup_logging(mode: str) -> None:
                     "class": "logging.handlers.RotatingFileHandler",
                     "level": log_level,
                     "formatter": "default",
-                    "filename": str(log_dir / f"treeadmin-{mode}.log"),
-                    "maxBytes": 2_000_000,
+                    "filename": str(log_dir / "treeadmin-{}.log".format(mode)),
+                    "maxBytes": 2000000,
                     "backupCount": 5,
                     "encoding": "utf-8",
                 },
@@ -48,8 +47,8 @@ def setup_logging(mode: str) -> None:
                     "class": "logging.handlers.RotatingFileHandler",
                     "level": "ERROR",
                     "formatter": "default",
-                    "filename": str(log_dir / f"treeadmin-{mode}-errors.log"),
-                    "maxBytes": 2_000_000,
+                    "filename": str(log_dir / "treeadmin-{}-errors.log".format(mode)),
+                    "maxBytes": 2000000,
                     "backupCount": 5,
                     "encoding": "utf-8",
                 },
@@ -57,8 +56,8 @@ def setup_logging(mode: str) -> None:
                     "class": "logging.handlers.RotatingFileHandler",
                     "level": "INFO",
                     "formatter": "audit",
-                    "filename": str(log_dir / f"treeadmin-{mode}-audit.log"),
-                    "maxBytes": 2_000_000,
+                    "filename": str(log_dir / "treeadmin-{}-audit.log".format(mode)),
+                    "maxBytes": 2000000,
                     "backupCount": 10,
                     "encoding": "utf-8",
                 },

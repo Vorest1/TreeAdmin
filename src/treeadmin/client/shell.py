@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.treeadmin.client import api
 from src.treeadmin.client import state
@@ -22,7 +20,7 @@ audit_logger = logging.getLogger("treeadmin.audit")
 OUTPUT_FILE_RE = re.compile(r"\s+#F\[(.+?)\]F#\s*$")
 
 
-AVAILABLE_PATTERNS: list[dict[str, str]] = [
+AVAILABLE_PATTERNS = [  # type: List[Dict[str, str]]
     {
         "name": "Save output to file",
         "syntax": "#F[путь_к_файлу]F#",
@@ -39,7 +37,8 @@ AVAILABLE_PATTERNS: list[dict[str, str]] = [
 ]
 
 
-def _extract_output_file(raw_command: str) -> tuple[str, str | None]:
+def _extract_output_file(raw_command):
+    # type: (str) -> Tuple[str, Optional[str]]
     match = OUTPUT_FILE_RE.search(raw_command)
     if not match:
         return raw_command.strip(), None
@@ -49,14 +48,16 @@ def _extract_output_file(raw_command: str) -> tuple[str, str | None]:
     return cleaned_command, output_path
 
 
-def _save_command_output(output_path: str, text: str) -> None:
+def _save_command_output(output_path, text):
+    # type: (str, str) -> None
     path = Path(output_path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 
 
-def _print_session_jobs(data: dict[str, Any]) -> None:
-    lines: list[str] = [f"\nSession {data.get('session_id')} queue:"]
+def _print_session_jobs(data):
+    # type: (Dict[str, Any]) -> None
+    lines = ["\nSession {} queue:".format(data.get("session_id"))]  # type: List[str]
 
     queue_items = data.get("queue", [])
     if not queue_items:
@@ -64,7 +65,11 @@ def _print_session_jobs(data: dict[str, Any]) -> None:
     else:
         for item in queue_items:
             lines.append(
-                f"  [{item.get('job_id')}] {item.get('status')} :: {item.get('command')}"
+                "  [{}] {} :: {}".format(
+                    item.get("job_id"),
+                    item.get("status"),
+                    item.get("command")
+                )
             )
 
     lines.append("History:")
@@ -74,8 +79,12 @@ def _print_session_jobs(data: dict[str, Any]) -> None:
     else:
         for item in history_items[-10:]:
             lines.append(
-                f"  [{item.get('job_id')}] {item.get('status')} "
-                f"rc={item.get('returncode')} :: {item.get('command')}"
+                "  [{}] {} rc={} :: {}".format(
+                    item.get("job_id"),
+                    item.get("status"),
+                    item.get("returncode"),
+                    item.get("command")
+                )
             )
 
     lines.append("Pending responses:")
@@ -85,14 +94,18 @@ def _print_session_jobs(data: dict[str, Any]) -> None:
     else:
         for item in response_items:
             lines.append(
-                f"  [response {item.get('response_id')}] "
-                f"job={item.get('job_id')} :: {item.get('command')}"
+                "  [response {}] job={} :: {}".format(
+                    item.get("response_id"),
+                    item.get("job_id"),
+                    item.get("command")
+                )
             )
 
     ui_print("\n".join(lines))
 
 
-def _print_sessions(sessions: list[dict[str, Any]]) -> None:
+def _print_sessions(sessions):
+    # type: (List[Dict[str, Any]]) -> None
     if not sessions:
         ui_print("No active sessions on server")
         return
@@ -102,29 +115,37 @@ def _print_sessions(sessions: list[dict[str, Any]]) -> None:
         session_id = str(item.get("session_id", ""))
         platform_name = str(item.get("platform", ""))
         cwd = str(item.get("cwd", ""))
-        lines.append(f"  session_id={session_id} platform={platform_name} cwd={cwd}")
+        lines.append(
+            "  session_id={} platform={} cwd={}".format(
+                session_id,
+                platform_name,
+                cwd
+            )
+        )
 
     ui_print("\n".join(lines))
 
 
-def _print_available_patterns() -> None:
-    lines: list[str] = [
+def _print_available_patterns():
+    # type: () -> None
+    lines = [  # type: List[str]
         "\nAvailable command patterns:",
         "",
     ]
 
     for index, item in enumerate(AVAILABLE_PATTERNS, start=1):
-        lines.append(f"{index}) {item['name']}")
-        lines.append(f"   Syntax:          {item['syntax']}")
-        lines.append(f"   Linux example:   {item['example_linux']}")
-        lines.append(f"   Regex:           {item['regex']}")
-        lines.append(f"   Description:     {item['description']}")
+        lines.append("{}) {}".format(index, item["name"]))
+        lines.append("   Syntax:          {}".format(item["syntax"]))
+        lines.append("   Linux example:   {}".format(item["example_linux"]))
+        lines.append("   Regex:           {}".format(item["regex"]))
+        lines.append("   Description:     {}".format(item["description"]))
         lines.append("")
 
     ui_print("\n".join(lines).rstrip())
 
 
-def _print_help() -> None:
+def _print_help():
+    # type: () -> None
     ui_print(
         "\nAvailable commands:\n"
         "  help       show this help\n"
@@ -140,7 +161,8 @@ def _print_help() -> None:
     )
 
 
-def _open_shell(target_id: str) -> tuple[str | None, str | None]:
+def _open_shell(target_id):
+    # type: (str) -> Tuple[Optional[str], Optional[str]]
     # log
     logger.info(
         "Client _shell_open requested : target_id=%s",
@@ -154,7 +176,7 @@ def _open_shell(target_id: str) -> tuple[str | None, str | None]:
         # log
         res = str(result).strip()
         if len(res) > 160:
-            res[: 157] + "..."
+            res = res[: 157] + "..."
         logger.warning(
             "Client _shell_open failed : target_id=%s status=%s result=%s",
             target_id,
@@ -162,7 +184,7 @@ def _open_shell(target_id: str) -> tuple[str | None, str | None]:
             res
         )
         #
-        ui_print(f"[{status}] {result}")
+        ui_print("[{}] {}".format(status, result))
         return None, None
 
     if not isinstance(result, dict):
@@ -173,7 +195,7 @@ def _open_shell(target_id: str) -> tuple[str | None, str | None]:
             type(result).__name__
         )
         #
-        ui_print(f"[502] invalid shell response: {result}")
+        ui_print("[502] invalid shell response: {}".format(result))
         return None, None
 
     session_id = result.get("session_id")
@@ -216,7 +238,8 @@ def _open_shell(target_id: str) -> tuple[str | None, str | None]:
     return session_id, cwd
 
 
-def _attach_shell(target_id: str, session_id: str) -> bool:
+def _attach_shell(target_id, session_id):
+    # type: (str, str) -> bool
     # log
     logger.info(
         "Client _attach_shell requested : target_id=%s session_id=%s",
@@ -237,7 +260,7 @@ def _attach_shell(target_id: str, session_id: str) -> bool:
         ui_print("Failed to list sessions")
         return False
 
-    matched_session: dict[str, Any] | None = None
+    matched_session = None  # type: Optional[Dict[str, Any]]
 
     for item in sessions:
         if str(item.get("session_id", "")) == session_id:
@@ -252,7 +275,7 @@ def _attach_shell(target_id: str, session_id: str) -> bool:
             session_id
         )
         #
-        ui_print(f"Session not found on server: {session_id}")
+        ui_print("Session not found on server: {}".format(session_id))
         return False
 
     cwd = str(matched_session.get("cwd", ""))
@@ -282,10 +305,11 @@ def _attach_shell(target_id: str, session_id: str) -> bool:
 
 
 def interactive_shell(
-    target_id: str,
-    existing_session_id: str | None = None,
-    existing_cwd: str | None = None,
-) -> None:
+    target_id,
+    existing_session_id=None,
+    existing_cwd=None,
+):
+    # type: (str, Optional[str], Optional[str]) -> None
     if existing_session_id is None:
         session_id, current_dir = _open_shell(target_id)
     else:
@@ -328,7 +352,13 @@ def interactive_shell(
     while True:
         try:
             prompt_dir = state.get_session_cwd(target_id, session_id, current_dir)
-            raw_cmd = ui_input(f"[{target_id}][session {session_id}] {prompt_dir} > ").strip()
+            raw_cmd = ui_input(
+                "[{}][session {}] {} > ".format(
+                    target_id,
+                    session_id,
+                    prompt_dir
+                )
+            ).strip()
         except KeyboardInterrupt:
             state.mark_session_background(target_id, session_id)
             start_or_update_result_poller(target_id, session_id, "background")
@@ -347,7 +377,11 @@ def interactive_shell(
             )
             #
 
-            ui_print(f"Left session {session_id}. Remote session is still active and will be polled in background.")
+            ui_print(
+                "Left session {}. Remote session is still active and will be polled in background.".format(
+                    session_id
+                )
+            )
             return
 
         if not raw_cmd:
@@ -403,7 +437,7 @@ def interactive_shell(
                 count
             )
             #
-            ui_print(f"Pulled responses: {count}")
+            ui_print("Pulled responses: {}".format(count))
             continue
 
         if lowered in {"exit", "quit", ":leave", "leave"}:
@@ -423,7 +457,11 @@ def interactive_shell(
             )
             #
 
-            ui_print(f"Left session {session_id}. Remote session is still active and will be polled in background.")
+            ui_print(
+                "Left session {}. Remote session is still active and will be polled in background.".format(
+                    session_id
+                )
+            )
             return
 
         if lowered in {"close", ":close"}:
@@ -449,7 +487,7 @@ def interactive_shell(
             # log
             short_err = str(result.get("error", "") if isinstance(result, dict) else result).strip()
             if len(short_err) > 160:
-                short_err[: 157] + "..."
+                short_err = short_err[: 157] + "..."
             logger.warning(
                 "Client command queue failed : target_id=%s session_id=%s status=%s "
                 "command_len=%s error=%s",
@@ -460,11 +498,11 @@ def interactive_shell(
                 short_err
             )
             #
-            ui_print(f"[{status}] {result.get('error', '')}")
+            ui_print("[{}] {}".format(status, result.get("error", "")))
             continue
 
         job_id = str(result.get("job_id", "")).strip()
-        ui_print(f"Queued job {job_id} on session {session_id}: {cmd}")
+        ui_print("Queued job {} on session {}: {}".format(job_id, session_id, cmd))
 
         # log
         logger.info(
@@ -479,7 +517,7 @@ def interactive_shell(
 
         short_cmd = str(cmd).strip()
         if len(short_cmd) > 160:
-            short_cmd[: 157] + "..."
+            short_cmd = short_cmd[: 157] + "..."
 
         audit_logger.info(
             "Client command queued : target_id=%s session_id=%s job_id=%s command_preview=%s",
@@ -523,7 +561,7 @@ def interactive_shell(
             # log
             short_resp = str(response).strip()
             if len(response) > 160:
-                response[: 157] + "..."
+                short_resp = short_resp[: 157] + "..."
             logger.warning(
                 "Client shell close failed : target_id=%s session_id=%s status=%s response=%s",
                 target_id,
@@ -532,7 +570,7 @@ def interactive_shell(
                 short_resp
             )
             #
-            ui_print(f"[{status}] {response}")
+            ui_print("[{}] {}".format(status, response))
         else:
             # log
             logger.info(
@@ -547,4 +585,4 @@ def interactive_shell(
                 session_id
             )
             #
-            ui_print(f"Closed remote session: {session_id}")
+            ui_print("Closed remote session: {}".format(session_id))

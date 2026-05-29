@@ -1,18 +1,18 @@
-from __future__ import annotations
-
 import logging
 import threading
 import time
 
 logger = logging.getLogger(__name__)
 
+
 class CleanupService:
-    def __init__(self, sessions, jobs, store) -> None:
+    def __init__(self, sessions, jobs, store):
         self.sessions = sessions
         self.jobs = jobs
         self.store = store
 
-    def start(self) -> None:
+    def start(self):
+        # type: () -> None
         session_thread = threading.Thread(
             target=self._cleanup_expired_sessions_loop,
             daemon=True,
@@ -36,7 +36,8 @@ class CleanupService:
         )
         #
 
-    def _cleanup_expired_sessions_loop(self) -> None:
+    def _cleanup_expired_sessions_loop(self):
+        # type: () -> None
         while True:
             time.sleep(self.sessions.session_cleaner_interval)
 
@@ -63,7 +64,7 @@ class CleanupService:
                     )
                     #
 
-                    print(f"SESSION TIMEOUT: closed inactive session {session_id}")
+                    print("SESSION TIMEOUT: closed inactive session {}".format(session_id))
                 except Exception as e:
                     # log
                     logger.exception(
@@ -71,9 +72,10 @@ class CleanupService:
                         session_id
                     )
                     #
-                    print(f"SESSION TIMEOUT ERROR: {session_id}: {e}")
+                    print("SESSION TIMEOUT ERROR: {}: {}".format(session_id, e))
 
-    def _cleanup_expired_responses_loop(self) -> None:
+    def _cleanup_expired_responses_loop(self):
+        # type: () -> None
         while True:
             time.sleep(60)
 

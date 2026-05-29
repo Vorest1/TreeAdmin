@@ -1,9 +1,15 @@
-from __future__ import annotations
-
 import logging
 import platform
-from http.server import ThreadingHTTPServer
 from pathlib import Path
+
+try:
+    from http.server import ThreadingHTTPServer
+except ImportError:
+    from http.server import HTTPServer
+    from socketserver import ThreadingMixIn
+
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
 
 from src.treeadmin.server.cleanup import CleanupService
 from src.treeadmin.server.handler import ProxyHandler
@@ -20,9 +26,10 @@ class TreeAdminHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8000):
+def run_server(host="0.0.0.0", port=8000):
+    # type: (str, int) -> None
     node_name = platform.node() or "node"
-    node_id = f"{node_name}:{port}"
+    node_id = "{}:{}".format(node_name, port)
 
     store = JobsStore(Path("data") / "server_store" / "state.json")
     logger.info("job storage started : %s", store.path)
@@ -46,7 +53,7 @@ def run_server(host: str = "0.0.0.0", port: int = 8000):
     httpd.proxy = proxy
 
     logger.info("server started http://%s:%s", host, port)
-    print(f"Server started: http://{host}:{port}")
+    print("Server started: http://{}:{}".format(host, port))
 
     jobs.recover_after_startup()
     cleanup.start()
