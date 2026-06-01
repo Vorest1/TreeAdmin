@@ -1,24 +1,25 @@
-from __future__ import annotations
-
 import logging
 import threading
 import time
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("treeadmin.audit")
 
+
 class SessionWorkers:
-    def __init__(self, sessions, jobs) -> None:
+    def __init__(self, sessions, jobs):
         self.sessions = sessions
         self.jobs = jobs
-        self._workers: dict[str, threading.Thread] = {}
+        self._workers = {}  # type: Dict[str, threading.Thread]
         self._lock = threading.RLock()
 
         # log
         logger.debug("session worker Initialized")
         #
 
-    def ensure_worker(self, session_id: str) -> None:
+    def ensure_worker(self, session_id):
+        # type: (str) -> None
         with self._lock:
             thread = self._workers.get(session_id)
             if thread is not None and thread.is_alive():
@@ -35,7 +36,7 @@ class SessionWorkers:
                 target=self._worker_loop,
                 args=(session_id,),
                 daemon=True,
-                name=f"session-worker-{session_id}",
+                name="session-worker-{}".format(session_id),
             )
             self._workers[session_id] = worker
             #worker.start()
@@ -58,7 +59,8 @@ class SessionWorkers:
             )
             #
 
-    def _worker_loop(self, session_id: str) -> None:
+    def _worker_loop(self, session_id):
+        # type: (str) -> None
         try:
             while True:
                 session = self.sessions.get_session(session_id)

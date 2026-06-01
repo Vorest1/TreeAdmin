@@ -1,6 +1,4 @@
-from __future__ import annotations
-
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from src.treeadmin.client import (
     get_unread_notification_count,
@@ -18,44 +16,56 @@ from src.treeadmin.config import ClientConfig
 from src.treeadmin.serv import run_server
 from src.treeadmin.logging_config import setup_logging
 
-def _print_topology(config: ClientConfig) -> None:
-    lines: list[str] = [
+
+def _print_topology(config):
+    # type: (ClientConfig) -> None
+    lines = [  # type: List[str]
         "\nCurrent topology:",
-        f"root_id: {config.root_id}",
-        f"timeout: {config.timeout}",
+        "root_id: {}".format(config.root_id),
+        "timeout: {}".format(config.timeout),
     ]
 
     default_port = config.data.get("default_port")
     if default_port is not None:
-        lines.append(f"default_port: {default_port}")
+        lines.append("default_port: {}".format(default_port))
 
     lines.append("nodes:")
     for node_id, node in config.nodes.items():
         host = node.get("host", "-")
         port = node.get("port", config.data.get("default_port", "-"))
         children = node.get("children", [])
-        lines.append(f"  {node_id}: host={host}, port={port}, children={children}")
+        lines.append(
+            "  {}: host={}, port={}, children={}".format(
+                node_id,
+                host,
+                port,
+                children,
+            )
+        )
 
     ui_print("\n".join(lines))
 
 
-def _reset_client_config() -> None:
+def _reset_client_config():
+    # type: () -> None
     config = ClientConfig.build_basic()
     config.save()
-    ui_print(f"Client config reset: {config.path}")
+    ui_print("Client config reset: {}".format(config.path))
 
 
-def _ping_menu() -> None:
+def _ping_menu():
+    # type: () -> None
     target_id = _choose_server()
     if not target_id:
         return
 
     status, body = ping_server(target_id)
     ui_print("CLIENT: sent REQUEST GET: Hello, Server")
-    ui_print(f"CLIENT: GET: {body.strip()} (status={status})")
+    ui_print("CLIENT: GET: {} (status={})".format(body.strip(), status))
 
 
-def _normalize_sessions(raw: Any) -> list[dict[str, Any]]:
+def _normalize_sessions(raw):
+    # type: (Any) -> List[Dict[str, Any]]
     if raw is None:
         return []
 
@@ -63,7 +73,7 @@ def _normalize_sessions(raw: Any) -> list[dict[str, Any]]:
         if isinstance(raw.get("sessions"), list):
             raw = raw["sessions"]
         else:
-            items: list[dict[str, Any]] = []
+            items = []  # type: List[Dict[str, Any]]
             for key, value in raw.items():
                 if isinstance(value, dict):
                     item = dict(value)
@@ -76,7 +86,7 @@ def _normalize_sessions(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
 
-    result: list[dict[str, Any]] = []
+    result = []  # type: List[Dict[str, Any]]
 
     for item in raw:
         if isinstance(item, dict):
@@ -92,14 +102,15 @@ def _normalize_sessions(raw: Any) -> list[dict[str, Any]]:
     return result
 
 
-def _choose_server() -> str | None:
+def _choose_server():
+    # type: () -> Optional[str]
     try:
         config = ClientConfig.load()
     except Exception as e:
-        ui_print(f"Failed to load client config: {e}")
+        ui_print("Failed to load client config: {}".format(e))
         return None
 
-    server_candidates: list[str] = []
+    server_candidates = []  # type: List[str]
     for node_id, node in config.nodes.items():
         host = node.get("host")
         port = node.get("port")
@@ -112,12 +123,12 @@ def _choose_server() -> str | None:
 
     if len(server_candidates) == 1:
         target_id = server_candidates[0]
-        ui_print(f"Connecting to only configured server: {target_id}")
+        ui_print("Connecting to only configured server: {}".format(target_id))
         return target_id
 
     lines = ["\nChoose server:"]
     for index, node_id in enumerate(server_candidates, start=1):
-        lines.append(f"{index}) {node_id}")
+        lines.append("{}) {}".format(index, node_id))
     lines.append("0) Back")
     ui_print("\n".join(lines))
 
@@ -138,7 +149,8 @@ def _choose_server() -> str | None:
     return server_candidates[index - 1]
 
 
-def _print_sessions_brief(sessions: list[dict[str, Any]]) -> None:
+def _print_sessions_brief(sessions):
+    # type: (List[Dict[str, Any]]) -> None
     if not sessions:
         ui_print("No active sessions on server")
         return
@@ -148,12 +160,20 @@ def _print_sessions_brief(sessions: list[dict[str, Any]]) -> None:
         session_id = str(item.get("session_id", ""))
         cwd = str(item.get("cwd", ""))
         platform_name = str(item.get("platform", ""))
-        lines.append(f"{index}) session {session_id} | platform={platform_name} | cwd={cwd}")
+        lines.append(
+            "{}) session {} | platform={} | cwd={}".format(
+                index,
+                session_id,
+                platform_name,
+                cwd,
+            )
+        )
 
     ui_print("\n".join(lines))
 
 
-def _connect_to_server_menu() -> None:
+def _connect_to_server_menu():
+    # type: () -> None
     target_id = _choose_server()
     if not target_id:
         return
@@ -162,7 +182,7 @@ def _connect_to_server_menu() -> None:
     sessions = _normalize_sessions(raw_sessions)
 
     if not sessions:
-        ui_print(f"\nNo active session on {target_id}.")
+        ui_print("\nNo active session on {}.".format(target_id))
         ui_print("Opening new session...")
         interactive_shell(target_id)
         return
@@ -171,7 +191,7 @@ def _connect_to_server_menu() -> None:
         session = sessions[0]
         session_id = str(session.get("session_id", ""))
         cwd = str(session.get("cwd", ""))
-        ui_print(f"\nFound active session {session_id} on {target_id}.")
+        ui_print("\nFound active session {} on {}.".format(session_id, target_id))
         ui_print("Connecting...")
         interactive_shell(
             target_id,
@@ -181,11 +201,14 @@ def _connect_to_server_menu() -> None:
         return
 
     ui_print(
-        f"\nServer {target_id} has multiple sessions:\n"
-        f"1) Continue latest session [{sessions[0].get('session_id')}]\n"
+        "\nServer {} has multiple sessions:\n"
+        "1) Continue latest session [{}]\n"
         "2) Choose session manually\n"
         "3) Open new session\n"
-        "0) Back"
+        "0) Back".format(
+            target_id,
+            sessions[0].get("session_id"),
+        )
     )
 
     choice = ui_input("> ").strip()
@@ -235,17 +258,19 @@ def _connect_to_server_menu() -> None:
     ui_print("Unknown menu item")
 
 
-def _show_topology_menu() -> None:
+def _show_topology_menu():
+    # type: () -> None
     try:
         config = ClientConfig.load()
     except Exception as e:
-        ui_print(f"Failed to load client config: {e}")
+        ui_print("Failed to load client config: {}".format(e))
         return
 
     _print_topology(config)
 
 
-def _client_menu() -> None:
+def _client_menu():
+    # type: () -> None
     try:
         restore_background_pollers_from_state()
 
@@ -260,11 +285,11 @@ def _client_menu() -> None:
             ui_print(
                 "\nClient menu:\n"
                 "1) Connect to server\n"
-                f"2) View notifications [{unread_count}]\n"
+                "2) View notifications [{}]\n"
                 "3) Ping server\n"
                 "4) Show topology\n"
                 "5) Reset config\n"
-                "0) Back"
+                "0) Back".format(unread_count)
             )
 
             choice = ui_input("> ").strip()
@@ -287,7 +312,8 @@ def _client_menu() -> None:
         ui_print("Close programm!\n")
 
 
-def main() -> None:
+def main():
+    # type: () -> None
     while True:
         ui_print(
             "\nSelect mode:\n"

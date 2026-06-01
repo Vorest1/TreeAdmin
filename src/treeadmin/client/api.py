@@ -1,11 +1,9 @@
-from __future__ import annotations
-
 import http.client
 import json
 import logging
 import socket
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from src.treeadmin.config import ClientConfig
 from src.treeadmin.routing import build_first_request
@@ -15,19 +13,20 @@ CONFIG_PATH = Path("config/config_client.json")
 logger = logging.getLogger(__name__)
 
 
-def load_client_config() -> ClientConfig:
+def load_client_config():
+    # type: () -> ClientConfig
     return ClientConfig.load(CONFIG_PATH)
 
 
 def request(
-    method: str,
-    target_id: str,
-    endpoint_path: str,
-    *,
-    payload: dict[str, Any] | None = None,
-    extra_query: dict[str, Any] | None = None,
-    timeout: int | None = None,
-) -> tuple[int, str]:
+    method,
+    target_id,
+    endpoint_path,
+    payload=None,
+    extra_query=None,
+    timeout=None,
+):
+    # type: (str, str, str, Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[int]) -> Tuple[int, str]
     try:
         client_config = load_client_config()
 
@@ -49,7 +48,7 @@ def request(
         raise
 
     body = b""
-    headers: dict[str, str] = {}
+    headers = {}  # type: Dict[str, str]
 
     try:
         if payload is not None:
@@ -108,7 +107,7 @@ def request(
             e
         )
         #
-        return 503, f"connection error: {e}"
+        return 503, "connection error: {}".format(e)
     
     except Exception as e:
         # log
@@ -123,7 +122,7 @@ def request(
             len(body)
         )
         #
-        return 500, f"client error: {e}"
+        return 500, "client error: {}".format(e)
     
     finally:
         try:
@@ -132,10 +131,11 @@ def request(
             pass
 
 
-def decode_json_response(raw: str) -> dict[str, Any] | None:
+def decode_json_response(raw):
+    # type: (str) -> Optional[Dict[str, Any]]
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except ValueError:
         # log
         logger.warning(
             "Client invalid json response : response_size=%s",
@@ -157,10 +157,11 @@ def decode_json_response(raw: str) -> dict[str, Any] | None:
     return data
 
 
-def get_configured_server_ids() -> list[str]:
+def get_configured_server_ids():
+    # type: () -> List[str]
     config = load_client_config()
 
-    result: list[str] = []
+    result = []  # type: List[str]
     for node_id, node in config.nodes.items():
         host = node.get("host")
         port = node.get("port")
@@ -171,7 +172,8 @@ def get_configured_server_ids() -> list[str]:
     return result
 
 
-def ping_server(target_id: str, msg: str = "Hello, Server") -> tuple[int, str]:
+def ping_server(target_id, msg="Hello, Server"):
+    # type: (str, str) -> Tuple[int, str]
     return request(
         "GET",
         target_id,
@@ -180,7 +182,8 @@ def ping_server(target_id: str, msg: str = "Hello, Server") -> tuple[int, str]:
     )
 
 
-def open_shell_request(target_id: str) -> tuple[int, dict[str, Any] | str]:
+def open_shell_request(target_id):
+    # type: (str) -> Tuple[int, Union[Dict[str, Any], str]]
     status, raw = request(
         "POST",
         target_id,
@@ -193,12 +196,13 @@ def open_shell_request(target_id: str) -> tuple[int, dict[str, Any] | str]:
 
     data = decode_json_response(raw)
     if data is None:
-        return 502, f"invalid JSON from server: {raw}"
+        return 502, "invalid JSON from server: {}".format(raw)
 
     return status, data
 
 
-def list_sessions(target_id: str) -> list[dict[str, Any]] | None:
+def list_sessions(target_id):
+    # type: (str) -> Optional[List[Dict[str, Any]]]
     status, raw = request("GET", target_id, "/list_sessions")
 
     if status != 200:
@@ -219,7 +223,7 @@ def list_sessions(target_id: str) -> list[dict[str, Any]] | None:
         #
         return None
 
-    result: list[dict[str, Any]] = []
+    result = []  # type: List[Dict[str, Any]]
     for item in sessions:
         if isinstance(item, dict):
             result.append(item)
@@ -228,10 +232,11 @@ def list_sessions(target_id: str) -> list[dict[str, Any]] | None:
 
 
 def send_queued_command(
-    target_id: str,
-    session_id: str,
-    command: str,
-) -> tuple[int, dict[str, Any]]:
+    target_id,
+    session_id,
+    command,
+):
+    # type: (str, str, str) -> Tuple[int, Dict[str, Any]]
     client_config = load_client_config()
     output_storage_format = client_config.preferred_storage_output_format
 
@@ -251,12 +256,13 @@ def send_queued_command(
 
     data = decode_json_response(raw)
     if data is None:
-        return 502, {"error": f"invalid JSON from server: {raw}"}
+        return 502, {"error": "invalid JSON from server: {}".format(raw)}
 
     return status, data
 
 
-def get_session_jobs(target_id: str, session_id: str) -> dict[str, Any] | None:
+def get_session_jobs(target_id, session_id):
+    # type: (str, str) -> Optional[Dict[str, Any]]
     status, raw = request(
         "GET",
         target_id,
@@ -274,7 +280,8 @@ def get_session_jobs(target_id: str, session_id: str) -> dict[str, Any] | None:
     return data
 
 
-def get_results_summary(target_id: str, session_id: str | None = None) -> tuple[int, dict[str, Any] | str]:
+def get_results_summary(target_id, session_id=None):
+    # type: (str, Optional[str]) -> Tuple[int, Union[Dict[str, Any], str]]
     extra_query = {"session_id": session_id} if session_id else None
 
     status, raw = request(
@@ -289,12 +296,13 @@ def get_results_summary(target_id: str, session_id: str | None = None) -> tuple[
 
     data = decode_json_response(raw)
     if data is None:
-        return 502, f"invalid JSON from server: {raw}"
+        return 502, "invalid JSON from server: {}".format(raw)
 
     return status, data
 
 
-def close_shell(target_id: str, session_id: str) -> tuple[int, str]:
+def close_shell(target_id, session_id):
+    # type: (str, str) -> Tuple[int, str]
     return request(
         "POST",
         target_id,
@@ -304,9 +312,10 @@ def close_shell(target_id: str, session_id: str) -> tuple[int, str]:
 
 
 def pull_pending_results_raw(
-    target_id: str,
-    session_id: str | None = None,
-) -> tuple[int, list[dict[str, Any]] | str]:
+    target_id,
+    session_id=None,
+):
+    # type: (str, Optional[str]) -> Tuple[int, Union[List[Dict[str, Any]], str]]
     query = {"session_id": session_id} if session_id else None
 
     status, raw = request(
@@ -321,7 +330,7 @@ def pull_pending_results_raw(
 
     data = decode_json_response(raw)
     if data is None:
-        return 502, f"invalid JSON from server: {raw}"
+        return 502, "invalid JSON from server: {}".format(raw)
 
     responses = data.get("responses", [])
     if not isinstance(responses, list):
@@ -335,7 +344,7 @@ def pull_pending_results_raw(
         #
         return 502, "server returned invalid responses list"
 
-    result: list[dict[str, Any]] = []
+    result = []  # type: List[Dict[str, Any]]
     for item in responses:
         if isinstance(item, dict):
             result.append(item)
@@ -343,7 +352,8 @@ def pull_pending_results_raw(
     return 200, result
 
 
-def ack_responses(target_id: str, response_ids: list[str]) -> tuple[int, str]:
+def ack_responses(target_id, response_ids):
+    # type: (str, List[str]) -> Tuple[int, str]
     clean_ids = [str(item).strip() for item in response_ids if str(item).strip()]
 
     if not clean_ids:

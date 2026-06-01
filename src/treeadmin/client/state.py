@@ -1,10 +1,8 @@
-from __future__ import annotations
-
 import json
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Set, Tuple
 
 
 DATA_DIR = Path("data")
@@ -16,17 +14,19 @@ _SEEN_RESPONSES_LOCK = threading.RLock()
 _ACTIVE_SESSIONS_LOCK = threading.RLock()
 _DASHBOARD_STATE_LOCK = threading.RLock()
 
-_SESSION_LAST_CWD: dict[tuple[str, str], str] = {}
-_PULL_LOCKS: dict[tuple[str, str], threading.RLock] = {}
-_SEEN_RESPONSE_IDS: set[tuple[str, str]] = set()
-_ACTIVE_SESSIONS: set[tuple[str, str]] = set()
+_SESSION_LAST_CWD = {}  # type: Dict[Tuple[str, str], str]
+_PULL_LOCKS = {}  # type: Dict[Tuple[str, str], Any]
+_SEEN_RESPONSE_IDS = set()  # type: Set[Tuple[str, str]]
+_ACTIVE_SESSIONS = set()  # type: Set[Tuple[str, str]]
 
 
-def _utc_now() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+def _utc_now():
+    # type: () -> str
+    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def set_session_cwd(target_id: str, session_id: str, cwd: str) -> None:
+def set_session_cwd(target_id, session_id, cwd):
+    # type: (str, str, str) -> None
     if not cwd:
         return
 
@@ -34,12 +34,14 @@ def set_session_cwd(target_id: str, session_id: str, cwd: str) -> None:
         _SESSION_LAST_CWD[(target_id, session_id)] = cwd
 
 
-def get_session_cwd(target_id: str, session_id: str, fallback: str = "") -> str:
+def get_session_cwd(target_id, session_id, fallback=""):
+    # type: (str, str, str) -> str
     with _CWD_LOCK:
         return _SESSION_LAST_CWD.get((target_id, session_id), fallback)
 
 
-def get_pull_lock(target_id: str, session_id: str | None) -> threading.RLock:
+def get_pull_lock(target_id, session_id):
+    # type: (str, Any) -> Any
     key = (target_id, session_id or "")
 
     with _PULL_LOCKS_LOCK:
@@ -50,11 +52,13 @@ def get_pull_lock(target_id: str, session_id: str | None) -> threading.RLock:
         return lock
 
 
-def response_seen_key(target_id: str, response_id: str) -> tuple[str, str]:
+def response_seen_key(target_id, response_id):
+    # type: (str, str) -> Tuple[str, str]
     return target_id, response_id
 
 
-def is_response_seen(target_id: str, response_id: str) -> bool:
+def is_response_seen(target_id, response_id):
+    # type: (str, str) -> bool
     if not response_id:
         return False
 
@@ -62,7 +66,8 @@ def is_response_seen(target_id: str, response_id: str) -> bool:
         return response_seen_key(target_id, response_id) in _SEEN_RESPONSE_IDS
 
 
-def mark_response_seen(target_id: str, response_id: str) -> None:
+def mark_response_seen(target_id, response_id):
+    # type: (str, str) -> None
     if not response_id:
         return
 
@@ -70,7 +75,8 @@ def mark_response_seen(target_id: str, response_id: str) -> None:
         _SEEN_RESPONSE_IDS.add(response_seen_key(target_id, response_id))
 
 
-def mark_session_active(target_id: str, session_id: str) -> None:
+def mark_session_active(target_id, session_id):
+    # type: (str, str) -> None
     if not target_id or not session_id:
         return
 
@@ -80,7 +86,8 @@ def mark_session_active(target_id: str, session_id: str) -> None:
     _update_known_session_mode(target_id, session_id, "active")
 
 
-def mark_session_background(target_id: str, session_id: str) -> None:
+def mark_session_background(target_id, session_id):
+    # type: (str, str) -> None
     if not target_id or not session_id:
         return
 
@@ -90,12 +97,14 @@ def mark_session_background(target_id: str, session_id: str) -> None:
     _update_known_session_mode(target_id, session_id, "background")
 
 
-def is_session_active(target_id: str, session_id: str) -> bool:
+def is_session_active(target_id, session_id):
+    # type: (str, str) -> bool
     with _ACTIVE_SESSIONS_LOCK:
         return (target_id, session_id) in _ACTIVE_SESSIONS
 
 
-def forget_session_state(target_id: str, session_id: str) -> None:
+def forget_session_state(target_id, session_id):
+    # type: (str, str) -> None
     with _CWD_LOCK:
         _SESSION_LAST_CWD.pop((target_id, session_id), None)
 
@@ -108,7 +117,8 @@ def forget_session_state(target_id: str, session_id: str) -> None:
     remove_known_session(target_id, session_id)
 
 
-def _default_dashboard_state() -> dict[str, Any]:
+def _default_dashboard_state():
+    # type: () -> Dict[str, Any]
     return {
         "ignored_responses": {},
         "pending_jobs": [],
@@ -118,7 +128,8 @@ def _default_dashboard_state() -> dict[str, Any]:
     }
 
 
-def _normalize_dashboard_state(data: dict[str, Any]) -> dict[str, Any]:
+def _normalize_dashboard_state(data):
+    # type: (Dict[str, Any]) -> Dict[str, Any]
     result = _default_dashboard_state()
     result.update(data)
 
@@ -137,7 +148,8 @@ def _normalize_dashboard_state(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def load_dashboard_state() -> dict[str, Any]:
+def load_dashboard_state():
+    # type: () -> Dict[str, Any]
     with _DASHBOARD_STATE_LOCK:
         if not DASHBOARD_STATE_PATH.exists():
             return _default_dashboard_state()
@@ -148,7 +160,7 @@ def load_dashboard_state() -> dict[str, Any]:
 
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError:
+        except ValueError:
             return _default_dashboard_state()
 
         if not isinstance(data, dict):
@@ -157,7 +169,8 @@ def load_dashboard_state() -> dict[str, Any]:
         return _normalize_dashboard_state(data)
 
 
-def save_dashboard_state(data: dict[str, Any]) -> None:
+def save_dashboard_state(data):
+    # type: (Dict[str, Any]) -> None
     with _DASHBOARD_STATE_LOCK:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         DASHBOARD_STATE_PATH.write_text(
@@ -166,13 +179,15 @@ def save_dashboard_state(data: dict[str, Any]) -> None:
         )
 
 
-def set_last_dashboard_scan_now() -> None:
+def set_last_dashboard_scan_now():
+    # type: () -> None
     data = load_dashboard_state()
     data["last_dashboard_scan_at"] = _utc_now()
     save_dashboard_state(data)
 
 
-def is_response_ignored(target_id: str, response_id: str) -> bool:
+def is_response_ignored(target_id, response_id):
+    # type: (str, str) -> bool
     if not target_id or not response_id:
         return False
 
@@ -186,7 +201,8 @@ def is_response_ignored(target_id: str, response_id: str) -> bool:
     return str(response_id) in {str(item) for item in ids}
 
 
-def ignore_response(target_id: str, response_id: str) -> None:
+def ignore_response(target_id, response_id):
+    # type: (str, str) -> None
     if not target_id or not response_id:
         return
 
@@ -205,12 +221,14 @@ def ignore_response(target_id: str, response_id: str) -> None:
     save_dashboard_state(data)
 
 
-def ignore_responses(target_id: str, response_ids: list[str]) -> None:
+def ignore_responses(target_id, response_ids):
+    # type: (str, List[str]) -> None
     for response_id in response_ids:
         ignore_response(target_id, response_id)
 
 
-def remove_ignored_response(target_id: str, response_id: str) -> None:
+def remove_ignored_response(target_id, response_id):
+    # type: (str, str) -> None
     data = load_dashboard_state()
     ignored = data.get("ignored_responses", {})
     ids = ignored.get(target_id, [])
@@ -221,7 +239,8 @@ def remove_ignored_response(target_id: str, response_id: str) -> None:
     save_dashboard_state(data)
 
 
-def register_command_target(target_id: str) -> None:
+def register_command_target(target_id):
+    # type: (str) -> None
     target_id = str(target_id).strip()
     if not target_id:
         return
@@ -240,12 +259,11 @@ def register_command_target(target_id: str) -> None:
 
 
 def register_pending_job(
-    *,
-    target_id: str,
-    session_id: str,
-    job_id: str,
-    command: str,
-) -> None:
+    target_id,
+    session_id,
+    job_id,
+    command,
+):
     target_id = str(target_id).strip()
     session_id = str(session_id).strip()
     job_id = str(job_id).strip()
@@ -288,7 +306,8 @@ def register_pending_job(
     save_dashboard_state(data)
 
 
-def mark_pending_job_done(target_id: str, job_id: str) -> None:
+def mark_pending_job_done(target_id, job_id):
+    # type: (str, str) -> None
     data = load_dashboard_state()
     pending = data.get("pending_jobs", [])
 
@@ -306,11 +325,12 @@ def mark_pending_job_done(target_id: str, job_id: str) -> None:
     save_dashboard_state(data)
 
 
-def get_pending_job_target_ids() -> set[str]:
+def get_pending_job_target_ids():
+    # type: () -> Set[str]
     data = load_dashboard_state()
     pending = data.get("pending_jobs", [])
 
-    result: set[str] = set()
+    result = set()  # type: Set[str]
     if isinstance(pending, list):
         for item in pending:
             if isinstance(item, dict):
@@ -322,12 +342,11 @@ def get_pending_job_target_ids() -> set[str]:
 
 
 def register_known_session(
-    target_id: str,
-    session_id: str,
-    *,
-    cwd: str = "",
-    mode: str = "background",
-) -> None:
+    target_id,
+    session_id,
+    cwd="",
+    mode="background",
+):
     target_id = str(target_id).strip()
     session_id = str(session_id).strip()
 
@@ -379,7 +398,8 @@ def register_known_session(
     save_dashboard_state(data)
 
 
-def _update_known_session_mode(target_id: str, session_id: str, mode: str) -> None:
+def _update_known_session_mode(target_id, session_id, mode):
+    # type: (str, str, str) -> None
     target_id = str(target_id).strip()
     session_id = str(session_id).strip()
 
@@ -411,7 +431,8 @@ def _update_known_session_mode(target_id: str, session_id: str, mode: str) -> No
         save_dashboard_state(data)
 
 
-def remove_known_session(target_id: str, session_id: str) -> None:
+def remove_known_session(target_id, session_id):
+    # type: (str, str) -> None
     data = load_dashboard_state()
     sessions = data.get("known_sessions", [])
 
@@ -429,11 +450,12 @@ def remove_known_session(target_id: str, session_id: str) -> None:
     save_dashboard_state(data)
 
 
-def get_known_sessions() -> list[dict[str, Any]]:
+def get_known_sessions():
+    # type: () -> List[Dict[str, Any]]
     data = load_dashboard_state()
     sessions = data.get("known_sessions", [])
 
-    result: list[dict[str, Any]] = []
+    result = []  # type: List[Dict[str, Any]]
 
     if isinstance(sessions, list):
         for item in sessions:
@@ -451,8 +473,9 @@ def get_known_sessions() -> list[dict[str, Any]]:
     return result
 
 
-def get_known_session_target_ids() -> set[str]:
-    result: set[str] = set()
+def get_known_session_target_ids():
+    # type: () -> Set[str]
+    result = set()  # type: Set[str]
 
     for item in get_known_sessions():
         target_id = str(item.get("target_id", "")).strip()
@@ -462,11 +485,12 @@ def get_known_session_target_ids() -> set[str]:
     return result
 
 
-def get_command_target_ids() -> set[str]:
+def get_command_target_ids():
+    # type: () -> Set[str]
     data = load_dashboard_state()
     raw_targets = data.get("command_target_ids", [])
 
-    result: set[str] = set()
+    result = set()  # type: Set[str]
 
     if isinstance(raw_targets, list):
         for item in raw_targets:
@@ -477,8 +501,9 @@ def get_command_target_ids() -> set[str]:
     return result
 
 
-def get_notification_target_ids() -> set[str]:
-    result: set[str] = set()
+def get_notification_target_ids():
+    # type: () -> Set[str]
+    result = set()  # type: Set[str]
 
     result.update(get_command_target_ids())
     result.update(get_pending_job_target_ids())

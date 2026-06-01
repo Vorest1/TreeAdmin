@@ -1,6 +1,5 @@
-from __future__ import annotations
 from datetime import datetime
-from typing import Any
+from typing import Any, Dict, List, Optional, Set
 
 import time
 import logging
@@ -8,13 +7,15 @@ import logging
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("treeadmin.audit")
 
+
 class JobsManager:
     def __init__(
         self,
         store,
-        node_id: str,
-        response_ttl_seconds: int = 48 * 60 * 60,
-    ) -> None:
+        node_id,
+        response_ttl_seconds=48 * 60 * 60,
+    ):
+        # type: (Any, str, int) -> None
         self.store = store
         self.node_id = node_id
         self.response_ttl_seconds = response_ttl_seconds
@@ -27,11 +28,13 @@ class JobsManager:
         #
 
     @staticmethod
-    def _utc_now() -> str:
-        return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    def _utc_now():
+        # type: () -> str
+        return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     @staticmethod
-    def _is_failed_response(item: dict[str, Any]) -> bool:
+    def _is_failed_response(item):
+        # type: (Dict[str, Any]) -> bool
         status = str(item.get("status", "")).lower()
         error = item.get("error")
         returncode = item.get("returncode")
@@ -48,7 +51,8 @@ class JobsManager:
         return False
 
     @staticmethod
-    def _short_error(value: Any, limit: int = 180) -> str | None:
+    def _short_error(value, limit=180):
+        # type: (Any, int) -> Optional[str]
         if value is None:
             return None
 
@@ -62,13 +66,15 @@ class JobsManager:
         return text[: limit - 3] + "..."
 
     @staticmethod
-    def _output_size(value: Any) -> int:
+    def _output_size(value):
+        # type: (Any) -> int
         if value is None:
             return 0
 
         return len(str(value).encode("utf-8", errors="replace"))
 
-    def _build_response_locked(self, state: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    def _build_response_locked(self, state, job):
+        # type: (Dict[str, Any], Dict[str, Any]) -> Dict[str, Any]
         response_id = str(state["next_response_id"])
         state["next_response_id"] += 1
         now_ts = time.time()
@@ -101,7 +107,8 @@ class JobsManager:
             ),
         }
 
-    def _build_history_entry(self, job: dict[str, Any]) -> dict[str, Any]:
+    def _build_history_entry(self, job):
+        # type: (Dict[str, Any]) -> Dict[str, Any]
         return {
             "job_id": str(job.get("job_id", "")),
             "session_id": str(job.get("session_id", "")),
@@ -122,7 +129,8 @@ class JobsManager:
             "stored_output_size": int(job.get("stored_output_size", 0) or 0),
         }
 
-    def _response_summary(self, item: dict[str, Any]) -> dict[str, Any]:
+    def _response_summary(self, item):
+        # type: (Dict[str, Any]) -> Dict[str, Any]
         return {
             "response_id": str(item.get("response_id", "")),
             "job_id": str(item.get("job_id", "")),
@@ -149,7 +157,8 @@ class JobsManager:
             ),
         }
 
-    def _queue_summary(self, item: dict[str, Any]) -> dict[str, Any]:
+    def _queue_summary(self, item):
+        # type: (Dict[str, Any]) -> Dict[str, Any]
         return {
             "job_id": str(item.get("job_id", "")),
             "session_id": str(item.get("session_id", "")),
@@ -163,11 +172,12 @@ class JobsManager:
 
     def enqueue_command(
         self,
-        session_id: str,
-        command: str,
-        cwd: str,
-        output_storage_format: str = "base64",
-    ) -> dict[str, Any]:
+        session_id,
+        command,
+        cwd,
+        output_storage_format="base64",
+    ):
+        # type: (str, str, str, str) -> Dict[str, Any]
         with self.store.lock:
             state = self.store.load_state()
             self.store.purge_expired_responses_locked(state)
@@ -184,7 +194,10 @@ class JobsManager:
                 )
                 #
                 raise RuntimeError(
-                    f"server job queue limit exceeded: {queue_count}/{self.store.max_queue_items}"
+                    "server job queue limit exceeded: {}/{}".format(
+                        queue_count,
+                        self.store.max_queue_items,
+                    )
                 )
 
             job_id = str(state["next_job_id"])
@@ -253,12 +266,13 @@ class JobsManager:
             "output_storage_format": job["output_storage_format"],
         }
 
-    def claim_next_job(self, session_id: str) -> dict[str, Any] | None:
+    def claim_next_job(self, session_id):
+        # type: (str) -> Optional[Dict[str, Any]]
         with self.store.lock:
             state = self.store.load_state()
             changed = self.store.purge_expired_responses_locked(state)
 
-            claimed_job: dict[str, Any] | None = None
+            claimed_job = None  # type: Optional[Dict[str, Any]]
 
             for item in state["queue"]:
                 if str(item.get("session_id", "")) != session_id:
@@ -297,15 +311,16 @@ class JobsManager:
 
     def finish_job(
         self,
-        job_id: str,
-        status: str,
-        output: str,
-        cwd: str,
-        returncode: int | None,
-        error: str | None,
-    ) -> dict[str, Any] | None:
-        response_entry: dict[str, Any] | None = None
-        final_job: dict[str, Any] | None = None
+        job_id,
+        status,
+        output,
+        cwd,
+        returncode,
+        error,
+    ):
+        # type: (str, str, str, str, Optional[int], Optional[str]) -> Optional[Dict[str, Any]]
+        response_entry = None  # type: Optional[Dict[str, Any]]
+        final_job = None  # type: Optional[Dict[str, Any]]
 
         prepared_output = self.store.prepare_output_for_storage(
             output,
@@ -322,7 +337,7 @@ class JobsManager:
         with self.store.lock:
             state = self.store.load_state()
 
-            queue_item: dict[str, Any] | None = None
+            queue_item = None  # type: Optional[Dict[str, Any]]
             for item in state["queue"]:
                 if str(item.get("job_id", "")) == str(job_id):
                     queue_item = item
@@ -442,7 +457,8 @@ class JobsManager:
 
         return response_entry
 
-    def get_session_jobs(self, session_id: str) -> dict[str, Any]:
+    def get_session_jobs(self, session_id):
+        # type: (str) -> Dict[str, Any]
         with self.store.lock:
             state = self.store.load_state()
             changed = self.store.purge_expired_responses_locked(state)
@@ -485,7 +501,8 @@ class JobsManager:
             "responses": response_items,
         }
 
-    def get_results_summary(self, session_id: str | None = None) -> dict[str, Any]:
+    def get_results_summary(self, session_id=None):
+        # type: (Optional[str]) -> Dict[str, Any]
         with self.store.lock:
             state = self.store.load_state()
             changed = self.store.purge_expired_responses_locked(state)
@@ -551,13 +568,14 @@ class JobsManager:
             "running": running,
         }
 
-    def cancel_queued_for_session(self, session_id: str, reason: str) -> None:
+    def cancel_queued_for_session(self, session_id, reason):
+        # type: (str, str) -> None
         changed = False
         canceled_count = 0 # for log
 
         with self.store.lock:
             state = self.store.load_state()
-            new_queue: list[dict[str, Any]] = []
+            new_queue = []  # type: List[Dict[str, Any]]
 
             for job in state["queue"]:
                 if (
@@ -629,13 +647,14 @@ class JobsManager:
             )
         #
 
-    def recover_after_startup(self) -> None:
+    def recover_after_startup(self):
+        # type: () -> None
         with self.store.lock:
             state = self.store.load_state()
             now = self._utc_now()
             recovered_running = 0 # for log
             kept_queued = 0 # for log
-            new_queue: list[dict[str, Any]] = []
+            new_queue = []  # type: List[Dict[str, Any]]
 
             for job in state["queue"]:
                 status = str(job.get("status", ""))
@@ -665,7 +684,7 @@ class JobsManager:
                 job["output"] = ""
                 job["cwd"] = str(job.get("cwd", ""))
                 job["returncode"] = None
-                job["error"] = f"server restarted with unsupported queued status: {status}"
+                job["error"] = "server restarted with unsupported queued status: {}".format(status)
                 job["output_size"] = 0
                 job["output_truncated"] = False
                 job["original_output_size"] = 0
@@ -730,15 +749,17 @@ class JobsManager:
             )
         #
 
-    def mark_startup_orphans(self) -> None:
+    def mark_startup_orphans(self):
+        # type: () -> None
         self.recover_after_startup()
 
-    def list_pending_responses(self, session_id: str | None = None) -> list[dict[str, Any]]:
+    def list_pending_responses(self, session_id=None):
+        # type: (Optional[str]) -> List[Dict[str, Any]]
         with self.store.lock:
             state = self.store.load_state()
             changed = self.store.purge_expired_responses_locked(state)
 
-            result = []
+            result = []  # type: List[Dict[str, Any]]
             for item in state["responses"]:
                 if session_id and str(item.get("session_id", "")) != session_id:
                     continue
@@ -759,8 +780,9 @@ class JobsManager:
         #
         return result
 
-    def ack_responses(self, response_ids: list[str]) -> int:
-        ids = {str(item) for item in response_ids if str(item).strip()}
+    def ack_responses(self, response_ids):
+        # type: (List[str]) -> int
+        ids = set(str(item) for item in response_ids if str(item).strip())  # type: Set[str]
         if not ids:
             logger.debug("ack responses skipped empty ids")
             return 0
@@ -769,7 +791,7 @@ class JobsManager:
 
         with self.store.lock:
             state = self.store.load_state()
-            new_responses = []
+            new_responses = []  # type: List[Dict[str, Any]]
 
             for item in state["responses"]:
                 if str(item.get("response_id", "")) in ids:

@@ -1,8 +1,7 @@
-from __future__ import annotations
-
 import logging
 import os
 import threading
+from typing import Dict, Tuple
 
 from src.treeadmin.client import api
 from src.treeadmin.client import state
@@ -12,32 +11,37 @@ ACTIVE_POLL_INTERVAL_SECONDS = float(os.getenv("TREEADMIN_ACTIVE_POLL_INTERVAL",
 BACKGROUND_POLL_INTERVAL_SECONDS = float(os.getenv("TREEADMIN_BACKGROUND_POLL_INTERVAL", "7.0"))
 
 _POLLERS_LOCK = threading.RLock()
-_RESULT_POLLERS: dict[tuple[str, str], threading.Thread] = {}
-_RESULT_POLL_STOP_EVENTS: dict[tuple[str, str], threading.Event] = {}
-_RESULT_POLL_MODES: dict[tuple[str, str], str] = {}
+_RESULT_POLLERS = {}  # type: Dict[Tuple[str, str], threading.Thread]
+_RESULT_POLL_STOP_EVENTS = {}  # type: Dict[Tuple[str, str], threading.Event]
+_RESULT_POLL_MODES = {}  # type: Dict[Tuple[str, str], str]
 
 logger = logging.getLogger(__name__)
 
-def _poll_interval_for_mode(mode: str) -> float:
+
+def _poll_interval_for_mode(mode):
+    # type: (str) -> float
     if mode == "active":
         return ACTIVE_POLL_INTERVAL_SECONDS
 
     return BACKGROUND_POLL_INTERVAL_SECONDS
 
 
-def _poll_active_session(target_id: str, session_id: str) -> None:
+def _poll_active_session(target_id, session_id):
+    # type: (str, str) -> None
     pull_pending_results(target_id, session_id, quiet=True)
 
 
-def _poll_background_session(target_id: str, session_id: str) -> None:
+def _poll_background_session(target_id, session_id):
+    # type: (str, str) -> None
     api.get_results_summary(target_id, session_id=session_id)
 
 
 def _result_poller_loop(
-    target_id: str,
-    session_id: str,
-    stop_event: threading.Event,
-) -> None:
+    target_id,
+    session_id,
+    stop_event,
+):
+    # type: (str, str, threading.Event) -> None
     key = (target_id, session_id)
 
     # log
@@ -80,7 +84,8 @@ def _result_poller_loop(
         #
 
 
-def start_or_update_result_poller(target_id: str, session_id: str, mode: str) -> None:
+def start_or_update_result_poller(target_id, session_id, mode):
+    # type: (str, str, str) -> None
     if mode not in {"active", "background"}:
         logger.error(
             "Result poller invalid mode target_id=%s session_id=%s mode=%s",
@@ -113,7 +118,7 @@ def start_or_update_result_poller(target_id: str, session_id: str, mode: str) ->
             target=_result_poller_loop,
             args=(target_id, session_id, stop_event),
             daemon=True,
-            name=f"result-poller-{target_id}-{session_id}",
+            name="result-poller-{}-{}".format(target_id, session_id),
         )
 
         _RESULT_POLL_STOP_EVENTS[key] = stop_event
@@ -148,7 +153,8 @@ def start_or_update_result_poller(target_id: str, session_id: str, mode: str) ->
         #
 
 
-def restore_background_pollers_from_state() -> None:
+def restore_background_pollers_from_state():
+    # type: () -> None
     restored_count = 0
 
     for item in state.get_known_sessions():
@@ -168,7 +174,8 @@ def restore_background_pollers_from_state() -> None:
         )
 
 
-def stop_result_poller(target_id: str, session_id: str) -> None:
+def stop_result_poller(target_id, session_id):
+    # type: (str, str) -> None
     key = (target_id, session_id)
 
     with _POLLERS_LOCK:
@@ -186,7 +193,8 @@ def stop_result_poller(target_id: str, session_id: str) -> None:
         )
 
 
-def stop_all_result_pollers() -> None:
+def stop_all_result_pollers():
+    # type: () -> None
     with _POLLERS_LOCK:
         items = list(_RESULT_POLL_STOP_EVENTS.items())
         _RESULT_POLL_STOP_EVENTS.clear()

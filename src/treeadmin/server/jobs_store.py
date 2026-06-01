@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import base64
 import json
 import logging
@@ -10,23 +8,24 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
 
 class JobsStore:
     SCHEMA_VERSION = 1
 
     def __init__(
         self,
-        path: Path,
-        response_ttl_seconds: int = 48 * 60 * 60,
-        *,
-        max_output_bytes: int | None = None,
-        max_history_items: int | None = None,
-        max_responses_items: int | None = None,
-        max_queue_items: int | None = None,
-    ) -> None:
+        path,
+        response_ttl_seconds=48 * 60 * 60,
+        max_output_bytes=None,
+        max_history_items=None,
+        max_responses_items=None,
+        max_queue_items=None,
+    ):
+        # type: (Path, int, Optional[int], Optional[int], Optional[int], Optional[int]) -> None
         self.path = Path(path)
         self.response_ttl_seconds = response_ttl_seconds
 
@@ -49,7 +48,7 @@ class JobsStore:
 
         self.lock = threading.RLock()
 
-        self.backup_path = self.path.with_name(f"{self.path.name}.bak")
+        self.backup_path = self.path.with_name("{}.bak".format(self.path.name))
         self.journal_path = self.path.parent / "journal.jsonl"
         self.lock_path = self.path.parent / "lock"
         self.tmp_dir = self.path.parent / "tmp"
@@ -79,7 +78,8 @@ class JobsStore:
         #
 
     @staticmethod
-    def _env_int(name: str, default: int) -> int:
+    def _env_int(name, default):
+        # type: (str, int) -> int
         raw = os.getenv(name)
         if raw is None or not raw.strip():
             return default
@@ -99,11 +99,13 @@ class JobsStore:
         return max(0, value)
 
     @staticmethod
-    def _utc_now() -> str:
-        return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    def _utc_now():
+        # type: () -> str
+        return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     @staticmethod
-    def normalize_output_storage_format(value: Any, default: str = "base64") -> str:
+    def normalize_output_storage_format(value, default="base64"):
+        # type: (Any, str) -> str
         normalized = str(value or default).strip().lower()
 
         if normalized in {"base64", "b64"}:
@@ -119,12 +121,12 @@ class JobsStore:
         )
         return default
 
-
     def prepare_output_for_storage(
         self,
-        value: Any,
-        output_storage_format: Any = "base64",
-    ) -> dict[str, Any]:
+        value,
+        output_storage_format="base64",
+    ):
+        # type: (Any, Any) -> Dict[str, Any]
         output_text, original_output_size, output_truncated = self.truncate_output(value)
         output_raw = output_text.encode("utf-8", errors="replace")
 
@@ -151,7 +153,8 @@ class JobsStore:
             "original_output_size": original_output_size,
         }
 
-    def _default_state(self) -> dict[str, Any]:
+    def _default_state(self):
+        # type: () -> Dict[str, Any]
         now = self._utc_now()
         return {
             "schema_version": self.SCHEMA_VERSION,
@@ -171,9 +174,10 @@ class JobsStore:
             },
         }
 
-    def _acquire_process_lock(self) -> None:
+    def _acquire_process_lock(self):
+        # type: () -> None
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        self._process_lock_file = open(self.lock_path, "a+", encoding="utf-8")
+        self._process_lock_file = open(str(self.lock_path), "a+", encoding="utf-8")
 
         if os.name != "posix":
             # log
@@ -204,7 +208,7 @@ class JobsStore:
                 os.getpid(),
             )
             #
-        except BlockingIOError as e:
+        except BlockingIOError:
             # log
             logger.error(
                 "Jobs Store process lock failed [already locked] : path=%s",
@@ -212,9 +216,9 @@ class JobsStore:
             )
             #
             raise RuntimeError(
-                f"Jobs store is already locked: {self.lock_path}. "
-                "Another TreeAdmin server instance may be running."
-            ) from e
+                "Jobs store is already locked: {}. "
+                "Another TreeAdmin server instance may be running.".format(self.lock_path)
+            )
         except Exception:
             # log
             logger.exception(
@@ -224,7 +228,8 @@ class JobsStore:
             #
             raise
 
-    def _migrate_legacy_state_if_needed(self) -> None:
+    def _migrate_legacy_state_if_needed(self):
+        # type: () -> None
         if self.path.exists():
             return
 
@@ -255,7 +260,8 @@ class JobsStore:
             #
             raise
 
-    def _fsync_dir(self, path: Path) -> None:
+    def _fsync_dir(self, path):
+        # type: (Path) -> None
         if os.name != "posix":
             return
 
@@ -265,7 +271,8 @@ class JobsStore:
         finally:
             os.close(fd)
 
-    def _safe_fsync_file(self, file_obj, *, path: Path, operation: str) -> None:
+    def _safe_fsync_file(self, file_obj, path, operation):
+        # type: (Any, Path, str) -> None
         try:
             file_obj.flush()
             os.fsync(file_obj.fileno())
@@ -290,7 +297,8 @@ class JobsStore:
             #
             raise
 
-    def _read_json_object(self, path: Path) -> dict[str, Any]:
+    def _read_json_object(self, path):
+        # type: (Path) -> Dict[str, Any]
         try:
             raw = path.read_text(encoding="utf-8").strip()
         except Exception:
@@ -309,7 +317,7 @@ class JobsStore:
                 path,
             )
             #
-            raise ValueError(f"empty json file: {path}")
+            raise ValueError("empty json file: {}".format(path))
 
         try:
             data = json.loads(raw)
@@ -330,11 +338,12 @@ class JobsStore:
                 type(data).__name__,
             )
             #
-            raise ValueError(f"json root must be object: {path}")
+            raise ValueError("json root must be object: {}".format(path))
 
         return data
 
-    def _backup_current_state(self) -> None:
+    def _backup_current_state(self):
+        # type: () -> None
         if not self.path.exists():
             return
 
@@ -352,9 +361,9 @@ class JobsStore:
             return
 
         try:
-            shutil.copyfile(self.path, self.backup_path)
+            shutil.copyfile(str(self.path), str(self.backup_path))
 
-            with open(self.backup_path, "r+b") as f:
+            with open(str(self.backup_path), "r+b") as f:
                 self._safe_fsync_file(
                     f,
                     path=self.backup_path,
@@ -374,16 +383,21 @@ class JobsStore:
 
     def _atomic_write_json(
         self,
-        path: Path,
-        data: dict[str, Any],
-        *,
-        create_backup: bool = True,
-    ) -> None:
+        path,
+        data,
+        create_backup=True,
+    ):
+        # type: (Path, Dict[str, Any], bool) -> None
         path.parent.mkdir(parents=True, exist_ok=True)
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
 
         tmp_path = self.tmp_dir / (
-            f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+            "{}.{}.{}.{}.tmp".format(
+                path.name,
+                os.getpid(),
+                threading.get_ident(),
+                uuid.uuid4().hex,
+            )
         )
 
         try:
@@ -392,7 +406,7 @@ class JobsStore:
                 + b"\n"
             )
 
-            with open(tmp_path, "wb") as f:
+            with open(str(tmp_path), "wb") as f:
                 f.write(encoded)
                 self._safe_fsync_file(
                     f,
@@ -403,7 +417,7 @@ class JobsStore:
             if create_backup:
                 self._backup_current_state()
 
-            os.replace(tmp_path, path)
+            os.replace(str(tmp_path), str(path))
             self._fsync_dir(path.parent)
         except Exception:
             # log
@@ -428,7 +442,8 @@ class JobsStore:
                 #
                 #pass
 
-    def _ensure_state_file(self) -> None:
+    def _ensure_state_file(self):
+        # type: () -> None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self._atomic_write_json(
@@ -443,7 +458,8 @@ class JobsStore:
             )
             #
 
-    def _normalize_state(self, data: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_state(self, data):
+        # type: (Dict[str, Any]) -> Dict[str, Any]
         result = self._default_state()
         result.update(data)
 
@@ -543,7 +559,8 @@ class JobsStore:
         self.compact_state_locked(result)
         return result
 
-    def load_state(self) -> dict[str, Any]:
+    def load_state(self):
+        # type: () -> Dict[str, Any]
         self._ensure_state_file()
 
         try:
@@ -584,14 +601,15 @@ class JobsStore:
                 #
 
         raise RuntimeError(
-            f"Failed to load jobs store and backup is unavailable: {self.path}"
+            "Failed to load jobs store and backup is unavailable: {}".format(self.path)
         )
 
     def append_journal_locked(
         self,
-        op: str,
-        payload: dict[str, Any] | None = None,
-    ) -> None:
+        op,
+        payload=None,
+    ):
+        # type: (str, Optional[Dict[str, Any]]) -> None
         entry = {
             "created_at": self._utc_now(),
             "op": op,
@@ -601,7 +619,7 @@ class JobsStore:
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            with open(self.journal_path, "a", encoding="utf-8") as f:
+            with open(str(self.journal_path), "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
                 f.write("\n")
                 self._safe_fsync_file(
@@ -621,11 +639,11 @@ class JobsStore:
 
     def save_state(
         self,
-        state: dict[str, Any],
-        *,
-        journal_op: str | None = None,
-        journal_payload: dict[str, Any] | None = None,
-    ) -> None:
+        state,
+        journal_op=None,
+        journal_payload=None,
+    ):
+        # type: (Dict[str, Any], Optional[str], Optional[Dict[str, Any]]) -> None
         normalized = self._normalize_state(state)
         normalized["updated_at"] = self._utc_now()
 
@@ -634,7 +652,8 @@ class JobsStore:
 
         self._atomic_write_json(self.path, normalized)
 
-    def compact_state_locked(self, state: dict[str, Any]) -> bool:
+    def compact_state_locked(self, state):
+        # type: (Dict[str, Any]) -> bool
         changed = False
 
         history = state.get("history", [])
@@ -677,7 +696,8 @@ class JobsStore:
 
         return changed
 
-    def purge_expired_responses_locked(self, state: dict[str, Any]) -> bool:
+    def purge_expired_responses_locked(self, state):
+        # type: (Dict[str, Any]) -> bool
         now = time.time()
         responses = state.get("responses", [])
 
@@ -714,7 +734,8 @@ class JobsStore:
 
         return changed
 
-    def truncate_output(self, value: Any) -> tuple[str, int, bool]:
+    def truncate_output(self, value):
+        # type: (Any) -> Tuple[str, int, bool]
         text = "" if value is None else str(value)
         raw = text.encode("utf-8", errors="replace")
         original_size = len(raw)
@@ -724,8 +745,11 @@ class JobsStore:
             return text, original_size, False
 
         marker = (
-            f"\n\n[TreeAdmin: output truncated; "
-            f"original_size={original_size} bytes; limit={limit} bytes]\n\n"
+            "\n\n[TreeAdmin: output truncated; "
+            "original_size={} bytes; limit={} bytes]\n\n".format(
+                original_size,
+                limit,
+            )
         ).encode("utf-8")
 
         if len(marker) >= limit:

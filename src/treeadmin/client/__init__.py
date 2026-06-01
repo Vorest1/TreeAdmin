@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from src.treeadmin.client.api import (
     ack_responses,
     close_shell,

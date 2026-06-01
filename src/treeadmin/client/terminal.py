@@ -1,12 +1,10 @@
-from __future__ import annotations
-
 import select
 import sys
 import threading
 
 
 class TerminalUI:
-    def __init__(self) -> None:
+    def __init__(self):
         self._lock = threading.RLock()
         self._input_active = False
         self._prompt = ""
@@ -14,17 +12,20 @@ class TerminalUI:
         self._last_render_len = 0
 
     @staticmethod
-    def _normalize_terminal_newlines(text: str) -> str:
+    def _normalize_terminal_newlines(text):
+        # type: (str) -> str
         return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
 
-    def _write_terminal_locked(self, text: str) -> None:
+    def _write_terminal_locked(self, text):
+        # type: (str) -> None
         sys.stdout.write(self._normalize_terminal_newlines(text))
 
-    def print_line(self, *args, sep: str = " ", end: str = "\n") -> None:
+    def print_line(self, *args, sep=" ", end="\n"):
         text = sep.join(str(arg) for arg in args) + end
         self.write(text)
 
-    def write(self, text: str) -> None:
+    def write(self, text):
+        # type: (str) -> None
         with self._lock:
             if self._input_active:
                 self._clear_line_locked()
@@ -39,7 +40,8 @@ class TerminalUI:
 
             sys.stdout.flush()
 
-    def input(self, prompt: str) -> str:
+    def input(self, prompt):
+        # type: (str) -> str
         if not sys.stdin.isatty():
             return input(prompt)
 
@@ -59,46 +61,53 @@ class TerminalUI:
                 self._buffer = ""
                 self._last_render_len = 0
 
-    def _clear_line_locked(self) -> None:
+    def _clear_line_locked(self):
+        # type: () -> None
         visible_len = max(
             self._last_render_len,
             len(self._prompt) + len(self._buffer),
         )
         sys.stdout.write("\r" + (" " * (visible_len + 8)) + "\r")
 
-    def _render_input_locked(self) -> None:
+    def _render_input_locked(self):
+        # type: () -> None
         self._clear_line_locked()
         line = self._prompt + self._buffer
         sys.stdout.write(line)
         sys.stdout.flush()
         self._last_render_len = len(line)
 
-    def _append_char(self, ch: str) -> None:
+    def _append_char(self, ch):
+        # type: (str) -> None
         with self._lock:
             self._buffer += ch
             self._render_input_locked()
 
-    def _backspace(self) -> None:
+    def _backspace(self):
+        # type: () -> None
         with self._lock:
             if self._buffer:
                 self._buffer = self._buffer[:-1]
                 self._render_input_locked()
 
-    def _finish_input(self) -> str:
+    def _finish_input(self):
+        # type: () -> str
         with self._lock:
             value = self._buffer
             self._write_terminal_locked("\n")
             sys.stdout.flush()
             return value
 
-    def _cancel_input(self) -> None:
+    def _cancel_input(self):
+        # type: () -> None
         with self._lock:
             self._write_terminal_locked("\n")
             sys.stdout.flush()
 
         raise KeyboardInterrupt
 
-    def _input_linux(self) -> str:
+    def _input_linux(self):
+        # type: () -> str
         import termios
         import tty
 
@@ -142,9 +151,10 @@ class TerminalUI:
 _TERMINAL = TerminalUI()
 
 
-def ui_print(*args, sep: str = " ", end: str = "\n") -> None:
+def ui_print(*args, sep=" ", end="\n"):
     _TERMINAL.print_line(*args, sep=sep, end=end)
 
 
-def ui_input(prompt: str) -> str:
+def ui_input(prompt):
+    # type: (str) -> str
     return _TERMINAL.input(prompt)

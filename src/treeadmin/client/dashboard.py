@@ -1,8 +1,6 @@
-from __future__ import annotations
-
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from src.treeadmin.client import api
 from src.treeadmin.client import state
@@ -10,14 +8,16 @@ from src.treeadmin.client.results import format_response_payload
 from src.treeadmin.client.terminal import ui_input, ui_print
 
 
-_LAST_DASHBOARD: dict[str, Any] | None = None
+_LAST_DASHBOARD = None  # type: Optional[Dict[str, Any]]
 
 
-def _utc_now() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+def _utc_now():
+    # type: () -> str
+    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _is_failed_summary(item: dict[str, Any]) -> bool:
+def _is_failed_summary(item):
+    # type: (Dict[str, Any]) -> bool
     if item.get("has_error") is True:
         return True
 
@@ -35,8 +35,9 @@ def _is_failed_summary(item: dict[str, Any]) -> bool:
     return False
 
 
-def _visible_responses(target_id: str, responses: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
+def _visible_responses(target_id, responses):
+    # type: (str, List[Dict[str, Any]]) -> List[Dict[str, Any]]
+    result = []  # type: List[Dict[str, Any]]
 
     for item in responses:
         response_id = str(item.get("response_id", "")).strip()
@@ -56,7 +57,8 @@ def _visible_responses(target_id: str, responses: list[dict[str, Any]]) -> list[
     return result
 
 
-def _scan_one_server(target_id: str) -> dict[str, Any]:
+def _scan_one_server(target_id):
+    # type: (str) -> Dict[str, Any]
     status, result = api.get_results_summary(target_id)
 
     if status != 200 or not isinstance(result, dict):
@@ -75,16 +77,18 @@ def _scan_one_server(target_id: str) -> dict[str, Any]:
     }
 
 
-def _get_scan_targets_from_history() -> list[str]:
+def _get_scan_targets_from_history():
+    # type: () -> List[str]
     targets = sorted(state.get_notification_target_ids())
     return targets
 
 
-def scan_dashboard() -> dict[str, Any]:
+def scan_dashboard():
+    # type: () -> Dict[str, Any]
     global _LAST_DASHBOARD
 
     targets = _get_scan_targets_from_history()
-    servers: list[dict[str, Any]] = []
+    servers = []  # type: List[Dict[str, Any]]
 
     if targets:
         with ThreadPoolExecutor(max_workers=min(8, len(targets))) as executor:
@@ -120,13 +124,15 @@ def scan_dashboard() -> dict[str, Any]:
     return snapshot
 
 
-def get_last_dashboard_or_scan() -> dict[str, Any]:
+def get_last_dashboard_or_scan():
+    # type: () -> Dict[str, Any]
     if _LAST_DASHBOARD is None:
         return scan_dashboard()
     return _LAST_DASHBOARD
 
 
-def _server_counts(entry: dict[str, Any]) -> dict[str, int]:
+def _server_counts(entry):
+    # type: (Dict[str, Any]) -> Dict[str, int]
     if not entry.get("online"):
         return {
             "ready": 0,
@@ -153,7 +159,8 @@ def _server_counts(entry: dict[str, Any]) -> dict[str, int]:
     }
 
 
-def get_unread_notification_count(snapshot: dict[str, Any] | None = None) -> int:
+def get_unread_notification_count(snapshot=None):
+    # type: (Optional[Dict[str, Any]]) -> int
     if snapshot is None:
         snapshot = get_last_dashboard_or_scan()
 
@@ -170,12 +177,13 @@ def get_unread_notification_count(snapshot: dict[str, Any] | None = None) -> int
     return total
 
 
-def print_dashboard(snapshot: dict[str, Any] | None = None) -> None:
+def print_dashboard(snapshot=None):
+    # type: (Optional[Dict[str, Any]]) -> None
     if snapshot is None:
         snapshot = get_last_dashboard_or_scan()
 
     if snapshot.get("error"):
-        ui_print(f"Dashboard error: {snapshot['error']}")
+        ui_print("Dashboard error: {}".format(snapshot["error"]))
         return
 
     servers = snapshot.get("servers", [])
@@ -187,13 +195,13 @@ def print_dashboard(snapshot: dict[str, Any] | None = None) -> None:
         )
         return
 
-    lines: list[str] = [
+    lines = [
         "\nDashboard:",
-        f"scan_at: {snapshot.get('created_at')}",
+        "scan_at: {}".format(snapshot.get("created_at")),
         "",
-    ]
+    ]  # type: List[str]
 
-    active_lines: list[str] = []
+    active_lines = []  # type: List[str]
     idle_count = 0
 
     for entry in servers:
@@ -201,7 +209,10 @@ def print_dashboard(snapshot: dict[str, Any] | None = None) -> None:
 
         if not entry.get("online"):
             active_lines.append(
-                f"  {target_id:<16} offline  {entry.get('error', 'connection error')}"
+                "  {:<16} offline  {}".format(
+                    target_id,
+                    entry.get("error", "connection error")
+                )
             )
             continue
 
@@ -217,11 +228,13 @@ def print_dashboard(snapshot: dict[str, Any] | None = None) -> None:
             continue
 
         active_lines.append(
-            f"  {target_id:<16} online   "
-            f"unread={counts['ready']} "
-            f"failed={counts['failed']} "
-            f"running={counts['running']} "
-            f"queued={counts['queued']}"
+            "  {:<16} online   unread={} failed={} running={} queued={}".format(
+                target_id,
+                counts["ready"],
+                counts["failed"],
+                counts["running"],
+                counts["queued"],
+            )
         )
 
     if active_lines:
@@ -231,33 +244,36 @@ def print_dashboard(snapshot: dict[str, Any] | None = None) -> None:
 
     if idle_count:
         lines.append("")
-        lines.append(f"  idle history servers hidden: {idle_count}")
+        lines.append("  idle history servers hidden: {}".format(idle_count))
 
     ui_print("\n".join(lines))
 
 
-def refresh_dashboard() -> dict[str, Any]:
+def refresh_dashboard():
+    # type: () -> Dict[str, Any]
     snapshot = scan_dashboard()
     print_dashboard(snapshot)
     return snapshot
 
 
-def refresh_notifications() -> dict[str, Any]:
+def refresh_notifications():
+    # type: () -> Dict[str, Any]
     return scan_dashboard()
 
 
-def show_dashboard() -> None:
+def show_dashboard():
+    # type: () -> None
     print_dashboard(get_last_dashboard_or_scan())
 
 
 def _collect_response_summaries(
-    *,
-    failed_only: bool = False,
-) -> list[dict[str, Any]]:
+    failed_only=False,
+):
+    # type: (bool) -> List[Dict[str, Any]]
     snapshot = get_last_dashboard_or_scan()
     servers = snapshot.get("servers", [])
 
-    result: list[dict[str, Any]] = []
+    result = []  # type: List[Dict[str, Any]]
 
     if not isinstance(servers, list):
         return result
@@ -293,12 +309,13 @@ def _collect_response_summaries(
     return result
 
 
-def _collect_notification_servers(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+def _collect_notification_servers(snapshot):
+    # type: (Dict[str, Any]) -> List[Dict[str, Any]]
     servers = snapshot.get("servers", [])
     if not isinstance(servers, list):
         return []
 
-    result: list[dict[str, Any]] = []
+    result = []  # type: List[Dict[str, Any]]
 
     for entry in servers:
         if not isinstance(entry, dict):
@@ -323,7 +340,8 @@ def _collect_notification_servers(snapshot: dict[str, Any]) -> list[dict[str, An
     return result
 
 
-def _print_notification_servers(items: list[dict[str, Any]]) -> None:
+def _print_notification_servers(items):
+    # type: (List[Dict[str, Any]]) -> None
     lines = ["\nServers with unread responses:"]
 
     for index, item in enumerate(items, start=1):
@@ -332,21 +350,28 @@ def _print_notification_servers(items: list[dict[str, Any]]) -> None:
         unread = int(counts.get("ready", 0) or 0)
         failed = int(counts.get("failed", 0) or 0)
 
-        failed_text = f", failed={failed}" if failed else ""
-        lines.append(f"  {index}) {target_id} — unread={unread}{failed_text}")
+        failed_text = ", failed={}".format(failed) if failed else ""
+        lines.append("  {}) {} — unread={}{}".format(index, target_id, unread, failed_text))
 
     lines.append("  0) Back")
     ui_print("\n".join(lines))
 
 
-def _get_visible_full_responses_for_server(target_id: str) -> list[dict[str, Any]]:
+def _get_visible_full_responses_for_server(target_id):
+    # type: (str) -> List[Dict[str, Any]]
     status, raw_items = api.pull_pending_results_raw(target_id)
 
     if status != 200 or not isinstance(raw_items, list):
-        ui_print(f"[{status}] failed to load full results from {target_id}: {raw_items}")
+        ui_print(
+            "[{}] failed to load full results from {}: {}".format(
+                status,
+                target_id,
+                raw_items
+            )
+        )
         return []
 
-    visible: list[dict[str, Any]] = []
+    visible = []  # type: List[Dict[str, Any]]
 
     for item in raw_items:
         if not isinstance(item, dict):
@@ -369,14 +394,15 @@ def _get_visible_full_responses_for_server(target_id: str) -> list[dict[str, Any
     return visible
 
 
-def _show_server_notifications(target_id: str) -> None:
+def _show_server_notifications(target_id):
+    # type: (str) -> None
     responses = _get_visible_full_responses_for_server(target_id)
 
     if not responses:
-        ui_print(f"\nNo unread responses on {target_id}")
+        ui_print("\nNo unread responses on {}".format(target_id))
         return
 
-    displayed_response_ids: list[str] = []
+    displayed_response_ids = []  # type: List[str]
 
     for response in responses:
         ui_print(format_response_payload(response))
@@ -410,23 +436,40 @@ def _show_server_notifications(target_id: str) -> None:
     if choice == "1":
         status, raw = api.ack_responses(target_id, displayed_response_ids)
         if status != 200:
-            ui_print(f"[{status}] failed to ack responses on {target_id}: {raw}")
+            ui_print(
+                "[{}] failed to ack responses on {}: {}".format(
+                    status,
+                    target_id,
+                    raw
+                )
+            )
         else:
-            ui_print(f"{target_id}: marked as read/deleted from server: {len(displayed_response_ids)}")
+            ui_print(
+                "{}: marked as read/deleted from server: {}".format(
+                    target_id,
+                    len(displayed_response_ids)
+                )
+            )
 
         refresh_notifications()
         return
 
     if choice == "2":
         state.ignore_responses(target_id, displayed_response_ids)
-        ui_print(f"{target_id}: ignored locally: {len(displayed_response_ids)}")
+        ui_print(
+            "{}: ignored locally: {}".format(
+                target_id,
+                len(displayed_response_ids)
+            )
+        )
         refresh_notifications()
         return
 
     ui_print("Responses kept unread")
 
 
-def show_notifications() -> None:
+def show_notifications():
+    # type: () -> None
     snapshot = refresh_notifications()
     servers = _collect_notification_servers(snapshot)
 
@@ -467,7 +510,8 @@ def show_notifications() -> None:
             return
 
 
-def _print_response_summary_list(items: list[dict[str, Any]]) -> None:
+def _print_response_summary_list(items):
+    # type: (List[Dict[str, Any]]) -> None
     if not items:
         ui_print("\nNo ready results")
         return
@@ -477,17 +521,26 @@ def _print_response_summary_list(items: list[dict[str, Any]]) -> None:
     for index, item in enumerate(items, start=1):
         failed_mark = "FAILED" if item.get("failed") else "OK"
         rc = item.get("returncode")
-        rc_text = f" rc={rc}" if isinstance(rc, int) else ""
+        rc_text = " rc={}".format(rc) if isinstance(rc, int) else ""
         lines.append(
-            f"  {index}) [{item['target_id']}][response {item['response_id']}]"
-            f"[job {item['job_id']}][session {item['session_id']}] "
-            f"{failed_mark}{rc_text} :: {item['command']}"
+            "  {}) [{}][response {}][job {}][session {}] "
+            "{}{} :: {}".format(
+                index,
+                item["target_id"],
+                item["response_id"],
+                item["job_id"],
+                item["session_id"],
+                failed_mark,
+                rc_text,
+                item["command"],
+            )
         )
 
     ui_print("\n".join(lines))
 
 
-def _parse_selection(raw: str, max_index: int) -> list[int]:
+def _parse_selection(raw, max_index):
+    # type: (str, int) -> List[int]
     raw = raw.strip().lower()
 
     if not raw:
@@ -499,7 +552,7 @@ def _parse_selection(raw: str, max_index: int) -> list[int]:
     if raw in {"all", "*"}:
         return list(range(1, max_index + 1))
 
-    result: list[int] = []
+    result = []  # type: List[int]
 
     for part in raw.replace(",", " ").split():
         try:
@@ -513,7 +566,8 @@ def _parse_selection(raw: str, max_index: int) -> list[int]:
     return sorted(set(result))
 
 
-def show_ready_results(*, failed_only: bool = False) -> None:
+def show_ready_results(failed_only=False):
+    # type: (bool) -> None
     refresh_notifications()
     items = _collect_response_summaries(failed_only=failed_only)
 
@@ -533,7 +587,7 @@ def show_ready_results(*, failed_only: bool = False) -> None:
 
     selected = [items[index - 1] for index in indexes]
 
-    by_target: dict[str, list[str]] = {}
+    by_target = {}  # type: Dict[str, List[str]]
     for item in selected:
         target_id = str(item.get("target_id", ""))
         response_id = str(item.get("response_id", ""))
@@ -541,7 +595,7 @@ def show_ready_results(*, failed_only: bool = False) -> None:
         if target_id and response_id:
             by_target.setdefault(target_id, []).append(response_id)
 
-    displayed_by_target: dict[str, list[str]] = {}
+    displayed_by_target = {}  # type: Dict[str, List[str]]
 
     for target_id, response_ids in by_target.items():
         full_items = _get_visible_full_responses_for_server(target_id)
@@ -574,9 +628,20 @@ def show_ready_results(*, failed_only: bool = False) -> None:
         for target_id, response_ids in displayed_by_target.items():
             status, raw = api.ack_responses(target_id, response_ids)
             if status != 200:
-                ui_print(f"[{status}] failed to ack responses on {target_id}: {raw}")
+                ui_print(
+                    "[{}] failed to ack responses on {}: {}".format(
+                        status,
+                        target_id,
+                        raw
+                    )
+                )
             else:
-                ui_print(f"{target_id}: deleted from pending results: {len(response_ids)}")
+                ui_print(
+                    "{}: deleted from pending results: {}".format(
+                        target_id,
+                        len(response_ids)
+                    )
+                )
 
         refresh_notifications()
         return
@@ -584,7 +649,12 @@ def show_ready_results(*, failed_only: bool = False) -> None:
     if action in {"i", "ignore"}:
         for target_id, response_ids in displayed_by_target.items():
             state.ignore_responses(target_id, response_ids)
-            ui_print(f"{target_id}: ignored locally: {len(response_ids)}")
+            ui_print(
+                "{}: ignored locally: {}".format(
+                    target_id,
+                    len(response_ids)
+                )
+            )
 
         refresh_notifications()
         return
@@ -592,20 +662,22 @@ def show_ready_results(*, failed_only: bool = False) -> None:
     ui_print("Results kept unread")
 
 
-def show_failed_results() -> None:
+def show_failed_results():
+    # type: () -> None
     show_ready_results(failed_only=True)
 
 
-def dashboard_menu() -> None:
+def dashboard_menu():
+    # type: () -> None
     while True:
         snapshot = refresh_notifications()
         unread = get_unread_notification_count(snapshot)
 
         ui_print(
             "\nNotification actions:\n"
-            f"1) View notifications [{unread}]\n"
+            "1) View notifications [{}]\n"
             "2) Refresh notification summary\n"
-            "0) Back"
+            "0) Back".format(unread)
         )
 
         choice = ui_input("> ").strip()
